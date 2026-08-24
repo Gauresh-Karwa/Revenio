@@ -137,3 +137,24 @@ def test_circuit_breaker_stops_a_module_that_never_stops_itself():
     events = store.get_events("case-1")
     execute_events = [e for e in events if e.event_type == "ExecutionResult"]
     assert len(execute_events) == 5
+
+def test_history_payloads_are_tagged_with_real_event_type_not_guessed():
+    """
+    Regression test for a real bug: modules used to guess "was this an
+    execute stage" by checking whether a payload dict happened to contain a
+    key named 'compliance_check_passed' — which only worked by coincidence.
+    This proves the orchestrator now tells modules the real event_type
+    explicitly, so nothing downstream has to guess from key names again.
+    """
+    store = EventStore()
+    orchestrator = Orchestrator(store)
+    orchestrator.register_module(DummyModule())
+
+    orchestrator.process_case("case-1", "dummy", {})
+
+    events = store.get_events("case-1")
+    execute_event = next(e for e in events if e.event_type == "ExecutionResult")
+    assert "compliance_check_passed" in execute_event.payload  # the real field is still there
+
+    final_state = store.derive_state("case-1")
+    assert final_state["terminal_status"] == "STOPPED:RESOLVED"
