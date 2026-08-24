@@ -88,7 +88,7 @@ def test_decide_escalates_channel_on_repeat_nudges():
     module = CheckoutAbandonmentModule()
     case = make_case()
     diagnosis = module.diagnose(case)
-    history = [{"compliance_check_passed": True}]
+    history = [{"_event_type": "ExecutionResult", "compliance_check_passed": True}]
     decision = module.decide(case, diagnosis, history)
     assert decision.action_params["channel"] == "sms"
 
@@ -104,7 +104,7 @@ def test_decide_escalates_unmapped_signal_to_human_review():
 
 def test_check_stop_halts_after_max_nudges():
     module = CheckoutAbandonmentModule()
-    history = [{"compliance_check_passed": True} for _ in range(3)]
+    history = [{"_event_type": "ExecutionResult", "compliance_check_passed": True} for _ in range(3)]
     result = module.check_stop(make_case(), history)
     assert result.should_stop is True
     assert result.stop_reason == StopReason.DIMINISHING_RETURNS

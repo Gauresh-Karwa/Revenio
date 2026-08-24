@@ -10,7 +10,7 @@ def test_check_stop_false_on_empty_history():
 
 def test_check_stop_true_after_one_execute_cycle():
     module = DummyModule()
-    history = [{"compliance_check_passed": True}]
+    history = [{"_event_type": "ExecutionResult", "compliance_check_passed": True}]
     result = module.check_stop(case={}, history=history)
     assert result.should_stop is True
     assert result.stop_reason == StopReason.RESOLVED

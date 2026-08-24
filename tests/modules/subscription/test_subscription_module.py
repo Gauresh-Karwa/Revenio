@@ -1,4 +1,4 @@
-﻿from backend.core.contract import ActionType, OutcomeStatus, StopReason
+from backend.core.contract import ActionType, OutcomeStatus, StopReason
 from backend.modules.subscription.module import SubscriptionModule
 
 
@@ -58,7 +58,7 @@ def test_check_stop_true_on_explicit_opt_out():
 
 def test_check_stop_true_after_max_retries():
     module = SubscriptionModule()
-    history = [{"compliance_check_passed": True} for _ in range(15)]
+    history = [{"_event_type": "ExecutionResult", "compliance_check_passed": True} for _ in range(15)]
     result = module.check_stop(make_case("51"), history=history)
     assert result.should_stop is True
     assert result.stop_reason == StopReason.COMPLIANCE_LIMIT
@@ -66,7 +66,7 @@ def test_check_stop_true_after_max_retries():
 
 def test_check_stop_false_just_under_max_retries():
     module = SubscriptionModule()
-    history = [{"compliance_check_passed": True} for _ in range(14)]
+    history = [{"_event_type": "ExecutionResult", "compliance_check_passed": True} for _ in range(14)]
     result = module.check_stop(make_case("51"), history=history)
     assert result.should_stop is False
 
@@ -80,6 +80,11 @@ def test_decide_retries_soft_decline():
 
 
 def test_decide_escalates_unmapped_code_to_human_review():
+    """
+    This is the exact gap found in an earlier draft of this module: an
+    unmapped code must route to human review, not silently STOP. Confidence
+    is what gates this, matching the contract's requires_human_review field.
+    """
     module = SubscriptionModule()
     case = make_case("99")
     diagnosis = module.diagnose(case)
@@ -92,7 +97,7 @@ def test_decide_backoff_increases_with_retry_count():
     module = SubscriptionModule()
     diagnosis = module.diagnose(make_case("51"))
     first = module.decide(make_case("51"), diagnosis, history=[])
-    later_history = [{"compliance_check_passed": True} for _ in range(2)]
+    later_history = [{"_event_type": "ExecutionResult", "compliance_check_passed": True} for _ in range(2)]
     third = module.decide(make_case("51"), diagnosis, later_history)
     assert third.action_params["retry_in_hours"] > first.action_params["retry_in_hours"]
 
