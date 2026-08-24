@@ -23,7 +23,7 @@ class DummyModule:
         self, case: dict[str, Any], history: list[dict[str, Any]]
     ) -> StopDecision:
         # Stop once we've already gone through one full execute+track cycle.
-        execute_count = sum(1 for h in history if "compliance_check_passed" in h)
+        execute_count = sum(1 for h in history if h.get("_event_type") == "ExecutionResult")
         if execute_count >= 1:
             return StopDecision(should_stop=True, stop_reason=StopReason.RESOLVED)
         return StopDecision(should_stop=False)

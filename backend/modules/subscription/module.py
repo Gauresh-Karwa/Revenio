@@ -61,7 +61,7 @@ class SubscriptionModule:
         if code in STOP_INSTRUCTION_CODES:
             return StopDecision(should_stop=True, stop_reason=StopReason.OPT_OUT)
 
-        retry_count = sum(1 for h in history if "compliance_check_passed" in h)
+        retry_count = sum(1 for h in history if h.get("_event_type") == "ExecutionResult")
         if retry_count >= MAX_RETRY_ATTEMPTS:
             return StopDecision(should_stop=True, stop_reason=StopReason.COMPLIANCE_LIMIT)
 
@@ -115,7 +115,7 @@ class SubscriptionModule:
             )
 
         if diagnosis.is_recoverable:
-            retry_count = sum(1 for h in history if "compliance_check_passed" in h)
+            retry_count = sum(1 for h in history if h.get("_event_type") == "ExecutionResult")
             backoff_index = min(retry_count, len(RETRY_BACKOFF_HOURS) - 1)
             backoff_hours = RETRY_BACKOFF_HOURS[backoff_index]
             return Decision(

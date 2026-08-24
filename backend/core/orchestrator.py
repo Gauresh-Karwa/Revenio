@@ -46,7 +46,7 @@ class Orchestrator:
 
         for _ in range(max_iterations):
             history = self._event_store.get_events(case_id)
-            history_payloads = [e.payload for e in history]
+            history_payloads = [{"_event_type": e.event_type, **e.payload} for e in history]
 
             stop = module.check_stop(case, history_payloads)
             self._event_store.append(

@@ -56,7 +56,7 @@ class CheckoutAbandonmentModule:
         if signal in NON_RECOVERABLE_SIGNALS:
             return StopDecision(should_stop=True, stop_reason=StopReason.COST_THRESHOLD)
 
-        nudge_count = sum(1 for h in history if "compliance_check_passed" in h)
+        nudge_count = sum(1 for h in history if h.get("_event_type") == "ExecutionResult")
         if nudge_count >= MAX_NUDGES:
             return StopDecision(should_stop=True, stop_reason=StopReason.DIMINISHING_RETURNS)
 
@@ -115,7 +115,7 @@ class CheckoutAbandonmentModule:
             )
 
         if diagnosis.is_recoverable:
-            nudge_count = sum(1 for h in history if "compliance_check_passed" in h)
+            nudge_count = sum(1 for h in history if h.get("_event_type") == "ExecutionResult")
             channel_index = min(nudge_count, len(NUDGE_CHANNEL_ESCALATION) - 1)
             channel = NUDGE_CHANNEL_ESCALATION[channel_index]
             return Decision(
