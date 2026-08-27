@@ -40,8 +40,21 @@ class OutcomeStatus(str, Enum):
 class Diagnosis:
     root_cause: str
     is_recoverable: bool
-    confidence: float  # 0.0-1.0; must be calibrated once a real model exists (arch doc 6.1)
+    confidence: float  # 0.0-1.0; categorization certainty ONLY — see below.
     raw_signal: dict[str, Any] = field(default_factory=dict)
+
+    # NEW. Deliberately a separate field from `confidence`, not a rename of
+    # it. `confidence` answers "how sure am I this root_cause label is
+    # correct" (still ~0.95 for known codes, ~0.2 for unmapped ones — a
+    # lookup-table property, unaffected by whether a trained model exists).
+    # `predicted_recovery_probability` answers a different question: "given
+    # that label, how likely is this specific case to recover." Conflating
+    # the two would silently change what requires_human_review's
+    # confidence-threshold gate means (decide() in the subscription module
+    # gates on confidence, not on this field). None for any code the model
+    # was never trained on (hard/stop/unmapped) — scoring those would be
+    # meaningless, not just unavailable.
+    predicted_recovery_probability: float | None = None
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import warnings
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from backend.core.contract import (
@@ -14,6 +16,7 @@ from backend.core.contract import (
     StopDecision,
     StopReason,
 )
+from backend.ml.features import FEATURE_NAMES, build_feature_vector_from_case
 
 SOFT_DECLINE_CODES: dict[str, str] = {
     "51": "insufficient_funds",
@@ -46,9 +49,50 @@ MAX_RETRY_ATTEMPTS = 15
 
 RETRY_BACKOFF_HOURS = [1, 6, 24, 72]
 
+DEFAULT_MODEL_PATH = Path(__file__).parent.parent.parent / "ml" / "models" / "subscription_winner.joblib"
+
+
+def _load_model_bundle(model_path: Path) -> dict | None:
+    """
+    Loads the offline-trained bundle (model_type + pipeline + feature
+    schema) if it exists. Returns None if it doesn't — the normal state
+    before train_subscription_model.py has ever been run — and must never
+    raise, since SubscriptionModule() is instantiated no-arg throughout the
+    orchestrator and test suite.
+
+    Also refuses a bundle whose feature schema doesn't match the module's
+    live FEATURE_NAMES: this is the concrete guard against the "model
+    trained on one feature set, module builds a different one, predictions
+    are silently wrong" failure mode.
+    """
+    if not model_path.exists():
+        return None
+    try:
+        import joblib
+
+        bundle = joblib.load(model_path)
+    except Exception:
+        return None
+
+    if bundle.get("feature_names") != FEATURE_NAMES:
+        warnings.warn(
+            "Loaded model bundle's feature_names does not match the current "
+            "build_feature_vector schema — refusing to use it. Re-run "
+            "train_subscription_model.py to retrain against the current "
+            "feature set. Falling back to rule-based confidence only.",
+            stacklevel=2,
+        )
+        return None
+
+    return bundle
+
 
 class SubscriptionModule:
     domain_type = "subscription"
+
+    def __init__(self, model_path: Path | str | None = None) -> None:
+        path = Path(model_path) if model_path is not None else DEFAULT_MODEL_PATH
+        self._model_bundle = _load_model_bundle(path)
 
     def check_stop(
         self, case: dict[str, Any], history: list[dict[str, Any]]
@@ -67,15 +111,35 @@ class SubscriptionModule:
 
         return StopDecision(should_stop=False)
 
+    def _predict_recovery_probability(self, case: dict[str, Any], code: str) -> float | None:
+        """
+        Only ever called for known soft codes. Model-agnostic: whichever
+        model_type won at training time (GBM, MLP, or a future candidate),
+        this call is identical — the winning Pipeline owns its own
+        preprocessing, so this method never needs to know what's inside it.
+        """
+        if self._model_bundle is None:
+            return None
+        pipeline = self._model_bundle["pipeline"]
+        features = [build_feature_vector_from_case({**case, "decline_code": code})]
+        return float(pipeline.predict_proba(features)[0][1])
+
     def diagnose(self, case: dict[str, Any]) -> Diagnosis:
         code = case.get("decline_code")
 
         if code in SOFT_DECLINE_CODES:
+            raw_signal = {"decline_code": code, "source": "iso8583_soft_lookup"}
+            if self._model_bundle is not None:
+                # Audit visibility only (architecture doc 7.2 developer/audit
+                # view) — never branched on for behavior.
+                raw_signal["model_type"] = self._model_bundle["model_type"]
+
             return Diagnosis(
                 root_cause=SOFT_DECLINE_CODES[code],
                 is_recoverable=True,
                 confidence=0.95,
-                raw_signal={"decline_code": code, "source": "iso8583_soft_lookup"},
+                raw_signal=raw_signal,
+                predicted_recovery_probability=self._predict_recovery_probability(case, code),
             )
 
         if code in HARD_DECLINE_CODES:
@@ -84,6 +148,9 @@ class SubscriptionModule:
                 is_recoverable=False,
                 confidence=0.95,
                 raw_signal={"decline_code": code, "source": "visa_category1_lookup"},
+                # No prediction: the model was never trained on hard-decline
+                # cases (they never reach a real retry), so scoring one
+                # would be meaningless, not just unavailable.
             )
 
         if code in STOP_INSTRUCTION_CODES:
@@ -118,17 +185,25 @@ class SubscriptionModule:
             retry_count = sum(1 for h in history if h.get("_event_type") == "ExecutionResult")
             backoff_index = min(retry_count, len(RETRY_BACKOFF_HOURS) - 1)
             backoff_hours = RETRY_BACKOFF_HOURS[backoff_index]
+
+            reasoning = f"Soft decline ({diagnosis.root_cause}), retry #{retry_count + 1}"
+            if diagnosis.predicted_recovery_probability is not None:
+                model_type = diagnosis.raw_signal.get("model_type", "unknown")
+                reasoning += (
+                    f" (diagnosis conf={diagnosis.confidence:.2f}, "
+                    f"{model_type} predicts {diagnosis.predicted_recovery_probability:.2f} "
+                    "recovery probability)"
+                )
+            else:
+                reasoning += " (no trained recovery model applied — rule-based confidence only)"
+
             return Decision(
                 action_type=ActionType.RETRY,
                 action_params={"retry_in_hours": backoff_hours},
-                reasoning=f"Soft decline ({diagnosis.root_cause}), retry #{retry_count + 1}",
+                reasoning=reasoning,
                 requires_human_review=False,
             )
 
-        # check_stop already halts the loop for every known hard/stop code
-        # before decide() is ever reached. Landing here means diagnose()
-        # marked something unrecoverable outside that known set — a real
-        # edge case, not silently swallowed.
         return Decision(
             action_type=ActionType.STOP,
             reasoning="Diagnosis marked unrecoverable outside the known stop-code set.",
@@ -136,9 +211,6 @@ class SubscriptionModule:
         )
 
     def execute(self, case: dict[str, Any], decision: Decision) -> ExecutionResult:
-        # check_stop already gated every hard-decline/compliance-limited case
-        # before this point, so compliance_check_passed is True by construction
-        # here — this is the retry-scheduling call, not the retry itself.
         return ExecutionResult(
             success=True,
             compliance_check_passed=True,
@@ -146,7 +218,6 @@ class SubscriptionModule:
         )
 
     def track_outcome(self, case: dict[str, Any]) -> Outcome:
-        
         simulated = case.get("simulated_retry_result")
         if simulated == "recovered":
             return Outcome(
@@ -157,5 +228,4 @@ class SubscriptionModule:
         return Outcome(status=OutcomeStatus.PENDING, amount_recovered=0.0)
 
     def on_promise_due(self, case: dict[str, Any]) -> PromiseOutcome:
-        # Subscriptions never produce a PROMISED outcome — no-op by design.
         return PromiseOutcome(kept=True)
