@@ -110,8 +110,7 @@ def _pick_decline_code(rng: random.Random) -> str:
     return rng.choice(STOP_CODES)
 
 
-def _sample_recovered(
-    rng: random.Random,
+def true_recovery_probability(
     decline_code: str,
     amount: float,
     attempt_number: int,
@@ -119,14 +118,19 @@ def _sample_recovered(
     is_near_payday: bool,
     rates: dict[str, float] | None = None,
     payday_boost: float = PAYDAY_BOOST,
-) -> bool:
+) -> float:
+    """
+    The exact probability _sample_recovered draws against — extracted as its
+    own public function so an oracle-ceiling calculator (backend/ml/oracle.py)
+    can call the SAME math the generator uses, rather than re-deriving it in
+    a second place where the two could silently drift apart. Returns 0.0 for
+    any code outside `rates` (hard/stop codes never reach a real retry, so
+    their true probability of a real retry recovering is 0, not "unknown").
+    """
     rates = rates or CODE_BASE_RECOVERY_RATE
 
     if decline_code not in rates:
-        # Hard/stop codes never reach a real retry in our system (check_stop
-        # halts before execute) — they get recorded with recovered=False by
-        # construction, not sampled, since no retry is ever attempted.
-        return False
+        return 0.0
 
     p = rates[decline_code]
     p *= ATTEMPT_DECAY[min(attempt_number - 1, len(ATTEMPT_DECAY) - 1)]
@@ -143,9 +147,31 @@ def _sample_recovered(
     # Real-world noise floor/ceiling — never fully deterministic even for the
     # most/least favorable case. This is part of what makes the label
     # genuinely learnable rather than a re-derivation of the rule lookup.
-    p = max(0.02, min(0.97, p))
+    return max(0.02, min(0.97, p))
 
+
+def _sample_recovered(
+    rng: random.Random,
+    decline_code: str,
+    amount: float,
+    attempt_number: int,
+    hour_of_day: int,
+    is_near_payday: bool,
+    rates: dict[str, float] | None = None,
+    payday_boost: float = PAYDAY_BOOST,
+) -> bool:
+    if decline_code not in (rates or CODE_BASE_RECOVERY_RATE):
+        # Hard/stop codes never reach a real retry in our system (check_stop
+        # halts before execute) — they get recorded with recovered=False by
+        # construction, not sampled, since no retry is ever attempted.
+        return False
+
+    p = true_recovery_probability(
+        decline_code, amount, attempt_number, hour_of_day, is_near_payday,
+        rates=rates, payday_boost=payday_boost,
+    )
     return rng.random() < p
+
 
 
 def generate_subscription_dataset(
