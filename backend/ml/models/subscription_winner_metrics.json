@@ -26,12 +26,13 @@
       "val_brier": 0.2132740784283853
     },
     "MLP": {
-      "val_auc": 0.7025106823350799,
-      "val_brier": 0.21310600715777808
+      "val_auc": 0.7026767366763631,
+      "val_brier": 0.21303063470461997
     }
   },
-  "winner_test_auc": 0.6865003542960811,
-  "winner_test_brier": 0.21846353118609405,
+  "winner_test_auc": 0.6868587861292395,
+  "winner_test_brier": 0.21830104979317633,
+  "auc_margin_vs_runner_up": 0.001524,
   "n_train": 5664,
   "n_val": 1184,
   "n_test": 1220

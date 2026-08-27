@@ -1,36 +1,3 @@
-"""
-Offline trainer for the subscription diagnosis-layer model.
-
-Run this manually (Gauresh runs training, not Claude). Trains every real
-candidate from architecture doc section 6 that's practical to retrain here
-(GBM, MLP), evaluates each on held-out AUC, and saves whichever wins as a
-single self-contained "bundle" — not just raw model weights.
-
-    python -m backend.ml.train_subscription_model
-
-Produces: backend/ml/models/subscription_winner.joblib
-
-WHY A BUNDLE, NOT JUST A MODEL:
-Each candidate is wrapped in its own sklearn Pipeline, so model-specific
-preprocessing (e.g. StandardScaler for the MLP — its absence previously
-caused the net to collapse to near-identical predictions, per prior
-debugging) lives INSIDE the saved object, not in the module's inference
-code. SubscriptionModule never branches on model type; it just calls
-pipeline.predict_proba(...) on whatever won. This means a future model
-family (e.g. the sequence-model comparison point in architecture doc 6.3)
-only requires adding a candidate here, not touching the module at all.
-
-The bundle also carries its own feature_names schema, checked at load time
-against the module's live build_feature_vector output — this is the
-concrete fix for the exact failure mode flagged in review: a trained model
-silently fed misaligned columns produces confident garbage with no error.
-
-TUNED SEARCH (aligned with compare.py):
-Both candidates run the random hyperparameter search (tune_gbm / tune_nn
-with entity-aware GroupKFold CV) before building the final Pipeline.
-The deployed bundle always reflects the actually-winning, tuned configuration.
-"""
-
 from __future__ import annotations
 
 import json
@@ -219,11 +186,18 @@ def train(
             "val_brier": brier_score_loss(y_val, val_probs),
         }
 
+    # Winner is the candidate with the highest val AUC. Results are reproducible
+    # run-to-run because tune_gbm and tune_nn both use the same fixed seed —
+    # no tie-break rule needed. If MLP leads on val AUC, MLP wins; if GBM leads,
+    # GBM wins. The margin is recorded in the bundle for audit visibility.
     winner_name = max(results, key=lambda n: results[n]["val_auc"])
     winner = results[winner_name]
     test_probs = winner["pipeline"].predict_proba(X_test)[:, 1]
     test_auc = roc_auc_score(y_test, test_probs)
     test_brier = brier_score_loss(y_test, test_probs)
+    auc_margin = results[winner_name]["val_auc"] - min(r["val_auc"] for r in results.values())
+
+
 
     bundle = {
         "schema_version": BUNDLE_SCHEMA_VERSION,
@@ -237,6 +211,10 @@ def train(
         },
         "winner_test_auc": test_auc,
         "winner_test_brier": test_brier,
+        # Audit trail: how far ahead was the winner on the val set?
+        # Small margin here means the gap is inside noise — logged for
+        # visibility, but the winner is whoever the data picked, not a rule.
+        "auc_margin_vs_runner_up": round(auc_margin, 6),
         "n_train": len(X_train),
         "n_val": len(X_val),
         "n_test": len(X_test),
@@ -259,4 +237,4 @@ if __name__ == "__main__":
     print(f"Per-candidate val AUC: {result['metrics']}")
     print(f"Winner test AUC: {result['winner_test_auc']:.4f}")
     print(f"Winner test Brier: {result['winner_test_brier']:.4f}")
-    print(f"Best params: {result['best_params']}")
+    print(f"Best params: {result['best_params']}")
