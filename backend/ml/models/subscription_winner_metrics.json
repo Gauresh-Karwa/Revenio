@@ -1,0 +1,38 @@
+{
+  "schema_version": 2,
+  "model_type": "MLP",
+  "best_params": {
+    "n_layers": 2,
+    "width_multiplier": 3,
+    "lr": 0.011198164932559403,
+    "dropout": 0.29790486236312685,
+    "weight_decay": 0.007413766946115151
+  },
+  "feature_names": [
+    "code_51",
+    "code_05",
+    "code_91",
+    "code_96",
+    "code_65",
+    "code_61",
+    "attempt_number",
+    "is_night",
+    "is_near_payday",
+    "amount"
+  ],
+  "metrics": {
+    "GBM": {
+      "val_auc": 0.7011525950438711,
+      "val_brier": 0.2132740784283853
+    },
+    "MLP": {
+      "val_auc": 0.7025106823350799,
+      "val_brier": 0.21310600715777808
+    }
+  },
+  "winner_test_auc": 0.6865003542960811,
+  "winner_test_brier": 0.21846353118609405,
+  "n_train": 5664,
+  "n_val": 1184,
+  "n_test": 1220
+}
