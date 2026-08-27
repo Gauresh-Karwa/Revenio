@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass, field
 from typing import Any
@@ -46,6 +47,41 @@ NIGHT_PENALTY = 0.98
 # NOT sourced magnitude.
 PAYDAY_BOOST = 1.25
 
+# NEW — code-51 (insufficient funds) amount-dependence. Mechanistic, not a
+# free-floating tuning knob: "insufficient funds" is a gap between balance
+# and requested amount, not a binary state, so recovery odds should fall as
+# the requested amount rises relative to what's typical. Only applied to
+# code 51 — every other soft code's generating function is unchanged, so
+# this is additive, not a rework of the existing (already-tested) rates.
+#
+# Shape: a logistic (sigmoid) decay centered on the dataset's amount
+# distribution median, not an arbitrary cutoff. amount ~ lognormal(mu=5.5,
+# sigma=0.6) below, whose median is exp(mu) = exp(5.5) ≈ 244.69 — computed
+# analytically, not eyeballed, so this stays correct if mu ever changes.
+# factor(median) == 1.0 exactly (midpoint of MIN/MAX), so amounts at the
+# median leave the base rate untouched; small amounts push the factor
+# toward MAX_AMOUNT_FACTOR (easier to cover a small gap), large amounts
+# toward MIN_AMOUNT_FACTOR (harder to cover a large one). A move from $10 to
+# $50 sits on the steep part of the curve near a small median-relative
+# amount; a move from $10,000 to $10,050 barely moves the factor at all —
+# the log-scale AMOUNT_SCALE is what gives the curve that shape.
+CODE_51_AMOUNT_MU = 5.5  # must match the amount lognormvariate mu below
+MEDIAN_AMOUNT = math.exp(CODE_51_AMOUNT_MU)
+AMOUNT_SCALE = MEDIAN_AMOUNT / 2  # controls steepness of the decay
+MIN_AMOUNT_FACTOR = 0.75
+MAX_AMOUNT_FACTOR = 1.25
+
+
+def _code_51_amount_factor(amount: float) -> float:
+    """
+    Logistic decay in [MIN_AMOUNT_FACTOR, MAX_AMOUNT_FACTOR], centered at
+    MEDIAN_AMOUNT. Pure function of amount — no RNG — so it's independently
+    testable and deterministic given an amount.
+    """
+    return MIN_AMOUNT_FACTOR + (MAX_AMOUNT_FACTOR - MIN_AMOUNT_FACTOR) / (
+        1 + math.exp((amount - MEDIAN_AMOUNT) / AMOUNT_SCALE)
+    )
+
 
 @dataclass(frozen=True)
 class SubscriptionRecord:
@@ -77,6 +113,7 @@ def _pick_decline_code(rng: random.Random) -> str:
 def _sample_recovered(
     rng: random.Random,
     decline_code: str,
+    amount: float,
     attempt_number: int,
     hour_of_day: int,
     is_near_payday: bool,
@@ -99,6 +136,9 @@ def _sample_recovered(
 
     if decline_code == "51" and is_near_payday:
         p *= payday_boost
+
+    if decline_code == "51":
+        p *= _code_51_amount_factor(amount)
 
     # Real-world noise floor/ceiling — never fully deterministic even for the
     # most/least favorable case. This is part of what makes the label
@@ -136,13 +176,13 @@ def generate_subscription_dataset(
 
         for _ in range(n_failures):
             decline_code = _pick_decline_code(rng)
-            amount = round(rng.lognormvariate(mu=5.5, sigma=0.6), 2)  # realistic right-skewed spend
+            amount = round(rng.lognormvariate(mu=CODE_51_AMOUNT_MU, sigma=0.6), 2)  # realistic right-skewed spend
             attempt_number = rng.randint(1, 3)
             hour_of_day = rng.randint(0, 23)
             is_near_payday = rng.random() < 0.3
 
             recovered = _sample_recovered(
-                rng, decline_code, attempt_number, hour_of_day, is_near_payday,
+                rng, decline_code, amount, attempt_number, hour_of_day, is_near_payday,
                 rates=rates, payday_boost=payday_boost,
             )
 
