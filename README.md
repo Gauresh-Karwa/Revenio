@@ -203,56 +203,121 @@ The winner is whichever candidate has the higher val AUC — no tie-break rule. 
 
 On a given run with seed=42, the val AUC gap between GBM and MLP is 0.0007–0.0016 — inside noise at this dataset scale. Which one wins varies slightly depending on the specific tuned hyperparameters found for each. The bundle records `auc_margin_vs_runner_up` for audit visibility. The oracle ceiling confirms both are at approximately the same distance from the theoretical best possible on this feature set.
 
+#### Step 5 Addendum — Sequence Model (4th Comparison Point) [DONE]
+
+Architecture doc §6.3 requires a sequence model (LSTM) as a fourth diagnosis-layer comparison point, evaluated with the same held-out entity-level discipline as baseline, GBM, and NN.
+
+What was built:
+- `generate_subscription_retry_sequences()` in `backend/data/subscription_generator.py` — generates genuine chronological retry chains (attempt $k$ only exists if attempt $k-1$ failed), incorporating a causal, recency-weighted customer failure pressure (EWMA with $\alpha=0.5$).
+- `backend/ml/sequence_features.py` — per-step feature construction (10 features: 6 one-hot decline codes, `is_night`, `is_near_payday`, `amount`, `customer_recent_failure_pressure`).
+- `backend/ml/models/sequence.py` — small sequence model (`RetryLSTM`), tuned via random search + `GroupKFold` entity-aware CV.
+- `backend/ml/compare_sequence.py` — standalone comparison script evaluating the LSTM against its own chain-distribution oracle ceiling.
+
+Results (`compare_sequence.py` output, seed=42):
+
+```
+STEP 5, COMPARISON POINT 4 — LSTM sequence model (architecture doc 6.3)
+v2: includes causal customer-history (recency-weighted) effect
+
+7952 genuine retry-chain cases generated (soft-decline only).
+  Sanity check — final recovery rate, low pressure (<0.1, n=7018): 0.832
+  Sanity check — final recovery rate, high pressure (>0.5, n=89): 0.663
+
+Entity-level split (cases): 5560 train / 1175 val / 1217 test
+Per-attempt training examples: 10542 train / 2227 val / 2348 test
+
+Oracle AUC for THIS chain-derived test distribution: 0.7035
+
+LSTM, random search over real ranges
+  Best params: hidden_size=26, lr=0.01236, weight_decay=2.38e-06
+  CV AUC=0.702
+  Test AUC=0.6986
+
+Result:
+  LSTM test AUC:                        0.6986
+  Oracle ceiling for THIS distribution:  0.7035
+  Gap to own ceiling:                    0.0049
+```
+
+| Metric | Value |
+|:---|:---|
+| Genuine retry-chain cases generated | 7,952 |
+| Per-attempt training examples (train / val / test) | 10,542 / 2,227 / 2,348 |
+| Best hyperparameters | `hidden_size=26, lr=0.01236, weight_decay=2.38e-06` |
+| LSTM CV AUC | 0.702 |
+| LSTM test AUC | 0.6986 |
+| Oracle ceiling for this chain distribution | 0.7035 |
+| LSTM gap to its own ceiling | 0.0049 |
+| (Reference) GBM gap to its own flat ceiling | 0.0026 |
+
+Key takeaways:
+1. **The customer-history effect is real and learnable**: Customers with recent failure pressure (>0.5) recover at 66.3% compared to 83.2% for low-pressure (<0.1) customers.
+2. **Tight tracking to oracle ceiling**: The LSTM achieves an AUC of 0.6986, landing within 0.0049 of the 0.7035 ceiling.
+3. **Caveat on flat vs sequence comparison**: The LSTM has access to `customer_recent_failure_pressure`, which the flat generator (`generate_subscription_dataset`) does not encode. The fair metric is each model's **gap to its own distribution's oracle ceiling** (0.0049 for LSTM vs 0.0026 for GBM).
+
 #### Files
 
-- `backend/ml/compare.py` — model comparison script (run to evaluate and compare)
-- `backend/ml/train_subscription_model.py` — trainer (run to produce the deployable bundle)
-- `backend/ml/oracle.py` — oracle ceiling computation
-- `backend/ml/features.py` — canonical feature construction (one place, used by trainer and module)
-- `backend/ml/models/gbm.py` — GBM hyperparameter search and training
-- `backend/ml/models/neural_net.py` — NN hyperparameter search and training
+- `backend/ml/compare.py` — flat model comparison: baseline vs GBM vs NN
+- `backend/ml/compare_sequence.py` — sequence model comparison: LSTM vs chain oracle ceiling
+- `backend/ml/train_subscription_model.py` — trainer (produces deployable bundle)
+- `backend/ml/oracle.py` — flat oracle ceiling computation
+- `backend/ml/features.py` — canonical flat feature construction
+- `backend/ml/sequence_features.py` — sequence per-step feature construction
+- `backend/ml/models/gbm.py` — XGBoost hyperparameter search and training
+- `backend/ml/models/neural_net.py` — PyTorch MLP hyperparameter search and training
+- `backend/ml/models/sequence.py` — PyTorch LSTM sequence model
 - `backend/ml/models/baseline.py` — rule-based baseline
 - `backend/ml/calibration.py` — calibration evaluation
 - `backend/ml/evaluation.py` — reliability curves, per-code breakdown
 - `tests/ml/` — oracle, baseline, calibration, feature tests
+- `tests/data/test_subscription_retry_sequences.py` — sequence generator, causality, and pressure tests
 
 ---
 
 ## Test suite
 
-All 76 tests pass as of step 5 completion.
+All 87 tests pass as of step 5 completion.
 
 ```
 python -m pytest -v
 
-tests/core/test_events.py                                    5 passed
-tests/core/test_orchestrator.py                              6 passed
-tests/data/test_checkout_abandonment_generator.py            6 passed
-tests/data/test_subscription_generator.py                    7 passed
+tests/core/test_events.py                                              5 passed
+tests/core/test_orchestrator.py                                        6 passed
+tests/data/test_checkout_abandonment_generator.py                      6 passed
+tests/data/test_subscription_generator.py                              7 passed
+tests/data/test_subscription_retry_sequences.py                       11 passed
 tests/integration/test_checkout_abandonment_through_orchestrator.py    3 passed
 tests/integration/test_subscription_through_orchestrator.py            4 passed
-tests/ml/test_baseline.py                                    2 passed
-tests/ml/test_calibration.py                                 1 passed
-tests/ml/test_features.py                                    3 passed
-tests/ml/test_oracle.py                                      2 passed
+tests/ml/test_baseline.py                                              2 passed
+tests/ml/test_calibration.py                                           1 passed
+tests/ml/test_features.py                                              3 passed
+tests/ml/test_oracle.py                                                2 passed
 tests/modules/checkout_abandonment/test_checkout_abandonment_module.py    13 passed
-tests/modules/dummy/test_dummy_module.py                     7 passed
-tests/modules/subscription/test_subscription_module.py      17 passed
+tests/modules/dummy/test_dummy_module.py                               7 passed
+tests/modules/subscription/test_subscription_module.py                17 passed
 
-76 passed in 3.64s
+87 passed in 3.85s
 ```
 
 ---
 
 ## How to run
 
-### Run the model comparison
+### Run the flat model comparison (Baseline vs GBM vs NN)
 
 ```
 python -m backend.ml.compare
 ```
 
 Generates a fresh dataset, runs entity-level splitting, performs random hyperparameter search for GBM and NN, evaluates all three models against the rule-based baseline on the held-out test set, prints calibration results and the cross-distribution generalization test.
+
+### Run the sequence model comparison (Comparison Point 4)
+
+```
+python -m backend.ml.compare_sequence
+```
+
+Generates chained retry sequences with causal customer failure pressure, tunes the LSTM sequence model, and evaluates test AUC against the chain-distribution oracle ceiling.
 
 ### Recompute the oracle ceiling
 
@@ -358,10 +423,12 @@ backend/
     checkout_abandonment_generator.py -- grounded synthetic abandonment records
     splitting.py         -- entity-level train/val/test splitting
   ml/
-    features.py          -- canonical feature construction (one source of truth)
-    compare.py           -- model comparison: baseline vs GBM vs NN
+    features.py          -- canonical flat feature construction (one source of truth)
+    sequence_features.py -- sequence per-step feature construction (10 features)
+    compare.py           -- flat model comparison: baseline vs GBM vs NN
+    compare_sequence.py  -- sequence model comparison: LSTM vs chain oracle ceiling
     train_subscription_model.py -- trainer: produces subscription_winner.joblib
-    oracle.py            -- oracle AUC ceiling computation
+    oracle.py            -- flat oracle AUC ceiling computation
     calibration.py       -- calibration evaluation (Platt/sigmoid)
     evaluation.py        -- reliability curves, per-code breakdown
     progress.py          -- progress bar for long searches
@@ -369,6 +436,7 @@ backend/
       baseline.py        -- rule-based lookup baseline
       gbm.py             -- XGBoost hyperparameter search and training
       neural_net.py      -- PyTorch MLP hyperparameter search and training
+      sequence.py        -- PyTorch LSTM sequence model
       subscription_winner.joblib          -- deployed model bundle (generated)
       subscription_winner_metrics.json    -- human-readable audit copy (generated)
   modules/
@@ -381,7 +449,7 @@ backend/
 
 tests/
   core/                  -- orchestrator and event-sourcing tests
-  data/                  -- generator and splitting tests
+  data/                  -- generator, splitting, and retry-sequence tests
   integration/           -- full orchestrator + module end-to-end tests
   ml/                    -- oracle, baseline, calibration, feature tests
   modules/               -- per-module unit tests (each module tested in isolation)
@@ -424,6 +492,8 @@ Three views:
 - Exact `requires_human_review` confidence threshold per domain.
 - Exact promise-to-pay cadence (how many broken promises before `DIMINISHING_RETURNS` fires).
 - Exact bandit algorithm variant for the learning core (discount factor vs window vs both), pending step 6.
+- Whether to engineer the `customer_recent_failure_pressure` signal as a flat feature for GBM/MLP in `compare.py` to directly compare flat vs sequence architectures with identical feature parity.
+- Whether to merge `compare_sequence.py` into `compare.py` as a unified 4-candidate comparison script — currently kept separate because the sequence model needs chained retry data rather than the flat per-row dataset the other three candidates share.
 
 ---
 
