@@ -1,12 +1,14 @@
 {
   "schema_version": 2,
-  "model_type": "MLP",
+  "model_type": "GBM",
   "best_params": {
-    "n_layers": 2,
-    "width_multiplier": 3,
-    "lr": 0.011198164932559403,
-    "dropout": 0.29790486236312685,
-    "weight_decay": 0.007413766946115151
+    "max_depth": 2,
+    "learning_rate": 0.028117140446520614,
+    "n_estimators": 245,
+    "subsample": 0.6123271338271757,
+    "colsample_bytree": 0.774686955692945,
+    "min_child_weight": 10,
+    "reg_lambda": 0.6562318236263225
   },
   "feature_names": [
     "code_51",
@@ -26,13 +28,13 @@
       "val_brier": 0.2132740784283853
     },
     "MLP": {
-      "val_auc": 0.7026767366763631,
-      "val_brier": 0.21303063470461997
+      "val_auc": 0.7003312191057381,
+      "val_brier": 0.21332788535392253
     }
   },
-  "winner_test_auc": 0.6868587861292395,
-  "winner_test_brier": 0.21830104979317633,
-  "auc_margin_vs_runner_up": 0.001524,
+  "winner_test_auc": 0.6852417071281063,
+  "winner_test_brier": 0.21881280180315782,
+  "auc_margin_vs_runner_up": 0.000821,
   "n_train": 5664,
   "n_val": 1184,
   "n_test": 1220
