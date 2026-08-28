@@ -118,6 +118,7 @@ def true_recovery_probability(
     is_near_payday: bool,
     rates: dict[str, float] | None = None,
     payday_boost: float = PAYDAY_BOOST,
+    customer_recent_failure_pressure: float = 0.0,
 ) -> float:
     """
     The exact probability _sample_recovered draws against — extracted as its
@@ -126,6 +127,14 @@ def true_recovery_probability(
     a second place where the two could silently drift apart. Returns 0.0 for
     any code outside `rates` (hard/stop codes never reach a real retry, so
     their true probability of a real retry recovering is 0, not "unknown").
+
+    customer_recent_failure_pressure defaults to 0.0 (neutral, no effect) —
+    generate_subscription_dataset (the FLAT generator) never passes a
+    non-default value, so its output and every existing test/oracle number
+    computed from it are byte-identical to before this parameter existed.
+    Only generate_subscription_retry_sequences (the CHAIN generator) passes
+    a real, causally-computed value. See that function's docstring for the
+    grounding.
     """
     rates = rates or CODE_BASE_RECOVERY_RATE
 
@@ -144,9 +153,8 @@ def true_recovery_probability(
     if decline_code == "51":
         p *= _code_51_amount_factor(amount)
 
-    # Real-world noise floor/ceiling — never fully deterministic even for the
-    # most/least favorable case. This is part of what makes the label
-    # genuinely learnable rather than a re-derivation of the rule lookup.
+    p *= _customer_history_factor(customer_recent_failure_pressure)
+
     return max(0.02, min(0.97, p))
 
 
@@ -159,19 +167,17 @@ def _sample_recovered(
     is_near_payday: bool,
     rates: dict[str, float] | None = None,
     payday_boost: float = PAYDAY_BOOST,
+    customer_recent_failure_pressure: float = 0.0,
 ) -> bool:
     if decline_code not in (rates or CODE_BASE_RECOVERY_RATE):
-        # Hard/stop codes never reach a real retry in our system (check_stop
-        # halts before execute) — they get recorded with recovered=False by
-        # construction, not sampled, since no retry is ever attempted.
         return False
 
     p = true_recovery_probability(
         decline_code, amount, attempt_number, hour_of_day, is_near_payday,
         rates=rates, payday_boost=payday_boost,
+        customer_recent_failure_pressure=customer_recent_failure_pressure,
     )
     return rng.random() < p
-
 
 
 def generate_subscription_dataset(
@@ -227,3 +233,114 @@ def generate_subscription_dataset(
             )
 
     return records
+
+
+MAX_CHAIN_ATTEMPTS = len(ATTEMPT_DECAY)  # 4 — beyond this, ATTEMPT_DECAY's
+# index is clamped (see true_recovery_probability), so the true probability
+# stops changing qualitatively; chaining further would add no new signal.
+
+HISTORY_EWMA_ALPHA = 0.5  # recency weight: how much the MOST RECENT case's
+# outcome dominates the running "failure pressure" vs older cases. Direction
+# (recent matters more than old) is standard RFM/collections practice;
+# 0.5 itself is an estimate, not individually sourced.
+MIN_HISTORY_FACTOR = 0.65  # floor: a customer whose recent cases have all
+# failed sees at most a 35% reduction in recovery probability — meaningful,
+# not catastrophic. Estimated, flagged.
+
+
+def _customer_history_factor(pressure: float) -> float:
+    return 1.0 - (1.0 - MIN_HISTORY_FACTOR) * pressure
+
+
+@dataclass(frozen=True)
+class RetryAttempt:
+    attempt_number: int
+    hour_of_day: int
+    recovered: bool  # True only for the final attempt in a recovered case
+
+
+@dataclass(frozen=True)
+class RetryCase:
+    case_id: str
+    customer_id: str
+    decline_code: str
+    amount: float
+    is_near_payday: bool
+    customer_recent_failure_pressure: float
+    attempts: list[RetryAttempt]
+
+    @property
+    def final_recovered(self) -> bool:
+        return self.attempts[-1].recovered if self.attempts else False
+
+
+def _generate_one_retry_case(
+    rng: random.Random,
+    case_id: str,
+    customer_id: str,
+    decline_code: str,
+    amount: float,
+    is_near_payday: bool,
+    rates: dict[str, float],
+    payday_boost: float,
+    customer_recent_failure_pressure: float,
+) -> RetryCase:
+    attempts: list[RetryAttempt] = []
+    for attempt_number in range(1, MAX_CHAIN_ATTEMPTS + 1):
+        hour_of_day = rng.randint(0, 23)
+        recovered = _sample_recovered(
+            rng, decline_code, amount, attempt_number, hour_of_day, is_near_payday,
+            rates=rates, payday_boost=payday_boost,
+            customer_recent_failure_pressure=customer_recent_failure_pressure,
+        )
+        attempts.append(
+            RetryAttempt(attempt_number=attempt_number, hour_of_day=hour_of_day, recovered=recovered)
+        )
+        if recovered:
+            break
+
+    return RetryCase(
+        case_id=case_id, customer_id=customer_id, decline_code=decline_code,
+        amount=amount, is_near_payday=is_near_payday,
+        customer_recent_failure_pressure=customer_recent_failure_pressure,
+        attempts=attempts,
+    )
+
+
+def generate_subscription_retry_sequences(
+    n_customers: int = 5000,
+    max_cases_per_customer: int = 4,
+    seed: int = 42,
+) -> list[RetryCase]:
+
+    rng = random.Random(seed)
+    cases: list[RetryCase] = []
+    case_counter = 0
+
+    for customer_index in range(n_customers):
+        customer_id = f"cust-{customer_index:05d}"
+        n_cases = rng.randint(0, max_cases_per_customer)
+        pressure = 0.0  # neutral prior — no history yet for this customer
+
+        for _ in range(n_cases):
+            decline_code = _pick_decline_code(rng)
+            if decline_code not in CODE_BASE_RECOVERY_RATE:
+                continue  # hard/stop codes never retry — no chain, no history update
+
+            amount = round(rng.lognormvariate(mu=CODE_51_AMOUNT_MU, sigma=0.6), 2)
+            is_near_payday = rng.random() < 0.3
+
+            case_counter += 1
+            case = _generate_one_retry_case(
+                rng, f"seqcase-{case_counter:06d}", customer_id, decline_code,
+                amount, is_near_payday, CODE_BASE_RECOVERY_RATE, PAYDAY_BOOST,
+                customer_recent_failure_pressure=pressure,
+            )
+            cases.append(case)
+
+            # Update pressure causally, using ONLY this case's own outcome,
+            # for whichever case (if any) comes next for this customer.
+            outcome_signal = 0.0 if case.final_recovered else 1.0
+            pressure = HISTORY_EWMA_ALPHA * outcome_signal + (1.0 - HISTORY_EWMA_ALPHA) * pressure
+
+    return cases
