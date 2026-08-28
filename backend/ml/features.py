@@ -1,3 +1,23 @@
+"""
+Canonical feature construction for the subscription diagnosis-layer model.
+
+This is the ONE place feature engineering happens. Both the trainer
+(train_subscription_model.py) and the inference path (SubscriptionModule)
+import from here — never re-implement feature construction in either place.
+A drift between "how the model was trained" and "how the module builds
+features at inference time" is silent and produces a model that returns
+confident garbage without ever raising an error, which is worse than no
+model at all.
+
+Feature set is exactly what architecture doc section 6.5 states the
+generator's true probability function depends on: decline code, attempt
+number, night-hours, and payday — plus `amount`, now that code 51 has a
+real amount-dependence (see subscription_generator.py). Only known soft
+codes are scoreable; hard/stop/unmapped codes were never part of the
+training distribution (check_stop halts before a retry is ever attempted
+for hard/stop codes) and must never be passed through this function.
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -48,7 +68,11 @@ def build_feature_vector(
 
 
 def build_feature_vector_from_case(case: dict[str, Any]) -> list[float]:
-
+    """
+    Convenience wrapper for the orchestrator's case dict shape (module-side
+    inference), rather than the generator's SubscriptionRecord shape
+    (trainer-side). Same underlying feature construction either way.
+    """
     return build_feature_vector(
         decline_code=case["decline_code"],
         attempt_number=case.get("attempt_number", 1),
@@ -58,7 +82,17 @@ def build_feature_vector_from_case(case: dict[str, Any]) -> list[float]:
     )
 
 
+# ---------------------------------------------------------------------------
+# DataFrame and matrix helpers — used by compare.py, trainer, and test suite.
+# ---------------------------------------------------------------------------
+
+
 def records_to_frame(records: list) -> "pd.DataFrame":
+    """
+    Converts a list of SubscriptionRecord objects to a pandas DataFrame,
+    filtering to soft-decline codes only (hard/stop codes were never part
+    of the training distribution and must not be scored).
+    """
     import pandas as pd
     from backend.data.subscription_generator import CODE_BASE_RECOVERY_RATE
 
@@ -99,9 +133,6 @@ def build_feature_matrix(
     )
     y = df["recovered"].to_numpy().astype(int)
 
-    # Encode customer_id strings to contiguous integers for GroupKFold.
-    # The mapping is stable within a single call (sorted order), so tests
-    # can check group membership without needing the original strings.
     unique_customers = sorted(df["customer_id"].unique())
     customer_to_int = {cid: i for i, cid in enumerate(unique_customers)}
     groups = np.array([customer_to_int[cid] for cid in df["customer_id"]])
