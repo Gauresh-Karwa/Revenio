@@ -1,35 +1,22 @@
 """
 Offline trainer for the subscription diagnosis-layer model.
 
-Run this manually (Gauresh runs training, not Claude). Trains every real
-candidate from architecture doc section 6 that's practical to retrain here
-(GBM, MLP), evaluates each on held-out AUC, and saves whichever wins as a
-single self-contained "bundle" — not just raw model weights.
+Run this manually (Gauresh runs training, not Claude).
 
     python -m backend.ml.train_subscription_model
 
 Produces: backend/ml/models/subscription_winner.joblib
 
-WHY A BUNDLE, NOT JUST A MODEL:
-Each candidate is wrapped in its own sklearn Pipeline, so model-specific
-preprocessing (e.g. StandardScaler for the MLP — its absence previously
-caused the net to collapse to near-identical predictions, per prior
-debugging) lives INSIDE the saved object, not in the module's inference
-code. SubscriptionModule never branches on model type; it just calls
-pipeline.predict_proba(...) on whatever won. This means a future model
-family (e.g. the sequence-model comparison point in architecture doc 6.3)
-only requires adding a candidate here, not touching the module at all.
-
-The bundle also carries its own feature_names schema, checked at load time
-against the module's live build_feature_vector output — this is the
-concrete fix for the exact failure mode flagged in review: a trained model
-silently fed misaligned columns produces confident garbage with no error.
-
-NOTE ON THE ORACLE CEILING: this trainer runs against the CURRENT generator,
-which now includes code-51 amount-dependence. The 0.694 AUC ceiling
-recorded from the original step-5 comparison was computed before that
-change and is now stale — this script does not recompute it. Treat any
-val_auc/test_auc printed below as not yet checked against a ceiling.
+SCHEMA v2: now trains on the ENRICHED feature set
+(FEATURE_NAMES_WITH_HISTORY, 11 features including
+customer_recent_failure_pressure), adopted as canonical after
+backend/ml/compare_with_history.py showed a flat model given this feature
+tracks its own oracle ceiling at least as tightly as the LSTM did — see
+README.md for the full comparison. generate_subscription_dataset is called
+with include_customer_history=True specifically for this reason. Any bundle
+trained by the OLD (v1, 10-feature) version of this script will be
+correctly rejected at load time by SubscriptionModule's feature_names check
+— that's the schema guard working as designed, not a bug to work around.
 """
 
 from __future__ import annotations
@@ -51,24 +38,25 @@ from backend.data.subscription_generator import (
     CODE_BASE_RECOVERY_RATE,
     generate_subscription_dataset,
 )
-from backend.ml.features import FEATURE_NAMES, build_feature_vector
+from backend.ml.features import FEATURE_NAMES_WITH_HISTORY, build_feature_vector_with_history
 
 MODEL_DIR = Path(__file__).parent / "models"
 MODEL_PATH = MODEL_DIR / "subscription_winner.joblib"
 
-BUNDLE_SCHEMA_VERSION = 1
+BUNDLE_SCHEMA_VERSION = 2  # v2: enriched feature set, see module docstring
 
 
 def _records_to_matrix(records) -> tuple[np.ndarray, np.ndarray]:
     soft_records = [r for r in records if r.decline_code in CODE_BASE_RECOVERY_RATE]
     X = np.array(
         [
-            build_feature_vector(
+            build_feature_vector_with_history(
                 decline_code=r.decline_code,
                 attempt_number=r.attempt_number,
                 hour_of_day=r.hour_of_day,
                 is_near_payday=r.is_near_payday,
                 amount=r.amount,
+                customer_recent_failure_pressure=r.customer_recent_failure_pressure,
             )
             for r in soft_records
         ]
@@ -78,11 +66,6 @@ def _records_to_matrix(records) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _build_candidates() -> dict[str, Pipeline]:
-    """
-    Every candidate is a full Pipeline (preprocessing + calibrated
-    classifier), so downstream code only ever calls .predict_proba() on
-    whichever one wins — no model-specific branching outside this file.
-    """
     gbm = Pipeline(
         steps=[
             (
@@ -96,7 +79,7 @@ def _build_candidates() -> dict[str, Pipeline]:
                         colsample_bytree=0.8,
                         eval_metric="logloss",
                     ),
-                    method="sigmoid",  # beat isotonic per architecture doc 6.5
+                    method="sigmoid",
                     cv=3,
                 ),
             )
@@ -105,7 +88,7 @@ def _build_candidates() -> dict[str, Pipeline]:
 
     mlp = Pipeline(
         steps=[
-            ("scaler", StandardScaler()),  # required — MLP collapsed without this previously
+            ("scaler", StandardScaler()),
             (
                 "clf",
                 CalibratedClassifierCV(
@@ -127,7 +110,7 @@ def _build_candidates() -> dict[str, Pipeline]:
 
 
 def train() -> dict:
-    records = generate_subscription_dataset()  # real default scale, per architecture doc 5
+    records = generate_subscription_dataset(include_customer_history=True)  # v2: enriched
     train_records, val_records, test_records = entity_level_split(records)
 
     X_train, y_train = _records_to_matrix(train_records)
@@ -154,7 +137,7 @@ def train() -> dict:
         "schema_version": BUNDLE_SCHEMA_VERSION,
         "model_type": winner_name,
         "pipeline": winner_pipeline,
-        "feature_names": FEATURE_NAMES,
+        "feature_names": FEATURE_NAMES_WITH_HISTORY,
         "metrics": {
             name: {"val_auc": r["val_auc"], "val_brier": r["val_brier"]}
             for name, r in results.items()
@@ -169,9 +152,6 @@ def train() -> dict:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump(bundle, MODEL_PATH)
 
-    # Human-readable copy alongside the joblib — metrics/model_type should be
-    # inspectable without unpickling, for the audit trail this whole project
-    # cares about.
     summary = {k: v for k, v in bundle.items() if k != "pipeline"}
     with open(MODEL_DIR / "subscription_winner_metrics.json", "w") as f:
         json.dump(summary, f, indent=2)

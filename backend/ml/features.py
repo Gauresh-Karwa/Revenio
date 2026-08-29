@@ -152,3 +152,81 @@ def build_group_kfold(n_splits: int = 5) -> "GroupKFold":
     from sklearn.model_selection import GroupKFold
 
     return GroupKFold(n_splits=n_splits)
+
+
+# ---------------------------------------------------------------------------
+# ENRICHED feature set — customer_recent_failure_pressure. ADDITIVE ONLY:
+# everything above is untouched, so SubscriptionModule's currently-deployed
+# bundle (trained on FEATURE_NAMES, 10 features) keeps loading and validating
+# exactly as before. This is a SEPARATE, parallel feature set for the
+# "does GBM benefit from customer history the same way the LSTM did"
+# experiment (backend/ml/compare_with_history.py) — not yet wired into
+# production.
+# ---------------------------------------------------------------------------
+
+FEATURE_NAMES_WITH_HISTORY: list[str] = FEATURE_NAMES + ["customer_recent_failure_pressure"]
+
+
+def build_feature_vector_with_history(
+    decline_code: str,
+    attempt_number: int,
+    hour_of_day: int,
+    is_near_payday: bool,
+    amount: float,
+    customer_recent_failure_pressure: float,
+    night_hours: frozenset[int] = frozenset(range(0, 6)),
+) -> list[float]:
+    return build_feature_vector(
+        decline_code=decline_code, attempt_number=attempt_number, hour_of_day=hour_of_day,
+        is_near_payday=is_near_payday, amount=amount, night_hours=night_hours,
+    ) + [float(customer_recent_failure_pressure)]
+
+
+def records_to_frame_with_history(records: list) -> "pd.DataFrame":
+    import pandas as pd
+    from backend.data.subscription_generator import CODE_BASE_RECOVERY_RATE
+
+    soft_records = [r for r in records if r.decline_code in CODE_BASE_RECOVERY_RATE]
+    return pd.DataFrame(
+        [
+            {
+                "case_id": r.case_id,
+                "customer_id": r.customer_id,
+                "decline_code": r.decline_code,
+                "amount": r.amount,
+                "attempt_number": r.attempt_number,
+                "hour_of_day": r.hour_of_day,
+                "is_near_payday": r.is_near_payday,
+                "recovered": int(r.recovered),
+                "customer_recent_failure_pressure": r.customer_recent_failure_pressure,
+            }
+            for r in soft_records
+        ]
+    )
+
+
+def build_feature_matrix_with_history(
+    df: "pd.DataFrame",
+) -> "tuple[np.ndarray, np.ndarray, list[str], np.ndarray]":
+    import numpy as np
+
+    X = np.array(
+        [
+            build_feature_vector_with_history(
+                decline_code=row["decline_code"],
+                attempt_number=int(row["attempt_number"]),
+                hour_of_day=int(row["hour_of_day"]),
+                is_near_payday=bool(row["is_near_payday"]),
+                amount=float(row["amount"]),
+                customer_recent_failure_pressure=float(row["customer_recent_failure_pressure"]),
+            )
+            for _, row in df.iterrows()
+        ]
+    )
+    y = df["recovered"].to_numpy().astype(int)
+
+    unique_customers = sorted(df["customer_id"].unique())
+    customer_to_int = {cid: i for i, cid in enumerate(unique_customers)}
+    groups = np.array([customer_to_int[cid] for cid in df["customer_id"]])
+
+    return X, y, FEATURE_NAMES_WITH_HISTORY, groups
