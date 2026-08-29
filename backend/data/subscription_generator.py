@@ -93,6 +93,11 @@ class SubscriptionRecord:
     hour_of_day: int
     is_near_payday: bool
     recovered: bool  # the label — stochastic, see module docstring
+    # NEW, additive, defaults to 0.0 (neutral): only populated when
+    # generate_subscription_dataset(include_customer_history=True) is used.
+    # 0.0 for every record from a default call — byte-identical to before
+    # this field existed, since _customer_history_factor(0.0) == 1.0.
+    customer_recent_failure_pressure: float = 0.0
 
 
 def _pick_decline_code(rng: random.Random) -> str:
@@ -186,12 +191,25 @@ def generate_subscription_dataset(
     seed: int = 42,
     base_recovery_override: dict[str, float] | None = None,
     payday_boost_override: float | None = None,
+    include_customer_history: bool = False,
 ) -> list[SubscriptionRecord]:
     """
     base_recovery_override / payday_boost_override exist ONLY so a second,
     deliberately different-parameter "regime B" dataset can be generated for
     the cross-distribution generalization test (architecture doc 5.1) —
     never used for the primary training dataset.
+
+    include_customer_history (default False, added after the sequence-model
+    comparison found customer-history to be real, exploitable signal — see
+    generate_subscription_retry_sequences' docstring for the full grounding):
+    when True, a customer's failure rows are treated as chronologically
+    ordered, and customer_recent_failure_pressure (the same causal,
+    recency-weighted EWMA used by the chain generator) is tracked per
+    customer and threaded into each row's true_recovery_probability. When
+    False (the default), NO extra randomness is consumed and every row's
+    pressure is exactly 0.0 — output is byte-identical to before this
+    parameter existed, so every already-recorded oracle/GBM/NN number in
+    README.md computed from the default call remains valid.
     """
     rng = random.Random(seed)
     rates = dict(CODE_BASE_RECOVERY_RATE)
@@ -205,6 +223,7 @@ def generate_subscription_dataset(
     for customer_index in range(n_customers):
         customer_id = f"cust-{customer_index:05d}"
         n_failures = rng.randint(0, max_failures_per_customer)
+        pressure = 0.0  # neutral; only ever updated when include_customer_history=True
 
         for _ in range(n_failures):
             decline_code = _pick_decline_code(rng)
@@ -213,9 +232,12 @@ def generate_subscription_dataset(
             hour_of_day = rng.randint(0, 23)
             is_near_payday = rng.random() < 0.3
 
+            row_pressure = pressure if include_customer_history else 0.0
+
             recovered = _sample_recovered(
                 rng, decline_code, amount, attempt_number, hour_of_day, is_near_payday,
                 rates=rates, payday_boost=payday_boost,
+                customer_recent_failure_pressure=row_pressure,
             )
 
             case_counter += 1
@@ -229,8 +251,12 @@ def generate_subscription_dataset(
                     hour_of_day=hour_of_day,
                     is_near_payday=is_near_payday,
                     recovered=recovered,
+                    customer_recent_failure_pressure=row_pressure,
                 )
             )
+
+            if include_customer_history:
+                pressure = update_causal_pressure(pressure, recovered)
 
     return records
 
@@ -250,6 +276,31 @@ MIN_HISTORY_FACTOR = 0.65  # floor: a customer whose recent cases have all
 
 def _customer_history_factor(pressure: float) -> float:
     return 1.0 - (1.0 - MIN_HISTORY_FACTOR) * pressure
+
+
+def update_causal_pressure(previous_pressure: float, this_case_recovered: bool) -> float:
+    """
+    THE single implementation of the causal, recency-weighted EWMA update —
+    used by both generators below AND by live inference (see
+    compute_pressure_from_customer_history and SubscriptionModule.diagnose).
+    One implementation, not multiple copies that could silently drift apart.
+    """
+    outcome_signal = 0.0 if this_case_recovered else 1.0
+    return HISTORY_EWMA_ALPHA * outcome_signal + (1.0 - HISTORY_EWMA_ALPHA) * previous_pressure
+
+
+def compute_pressure_from_customer_history(past_case_outcomes: list[bool]) -> float:
+    """
+    Given a customer's PAST case outcomes in chronological order (True =
+    recovered, False = lost), replays the same causal EWMA update used at
+    generation time and returns the resulting pressure. This is what live
+    inference calls (SubscriptionModule.diagnose), so training and
+    inference compute this identically by construction. Empty list -> 0.0.
+    """
+    pressure = 0.0
+    for recovered in past_case_outcomes:
+        pressure = update_causal_pressure(pressure, recovered)
+    return pressure
 
 
 @dataclass(frozen=True)
@@ -340,7 +391,6 @@ def generate_subscription_retry_sequences(
 
             # Update pressure causally, using ONLY this case's own outcome,
             # for whichever case (if any) comes next for this customer.
-            outcome_signal = 0.0 if case.final_recovered else 1.0
-            pressure = HISTORY_EWMA_ALPHA * outcome_signal + (1.0 - HISTORY_EWMA_ALPHA) * pressure
+            pressure = update_causal_pressure(pressure, case.final_recovered)
 
     return cases
