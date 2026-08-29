@@ -94,11 +94,21 @@ class DomainModule(Protocol):
     Every domain module (subscription, checkout-abandonment, B2B, ...)
     implements this. The orchestrator only ever calls these five methods
     (plus on_promise_due) and never reaches into a module's internals.
+
+    NAMING NOTE: decide/check_stop's `history` is THIS case's own past
+    events (the within-case retry chain — e.g. "how many times has this
+    same decline event already been retried"). diagnose's `customer_history`
+    is a DIFFERENT, cross-case concept — this customer's OTHER, past cases
+    and their outcomes. Conflating the two would be a real bug (see
+    backend/core/events.py's get_customer_case_history vs get_events) —
+    deliberately different parameter names, not an oversight.
     """
 
     domain_type: str
 
-    def diagnose(self, case: dict[str, Any]) -> Diagnosis: ...
+    def diagnose(
+        self, case: dict[str, Any], customer_history: list[dict[str, Any]] | None = None
+    ) -> Diagnosis: ...
 
     def decide(
         self, case: dict[str, Any], diagnosis: Diagnosis, history: list[dict[str, Any]]

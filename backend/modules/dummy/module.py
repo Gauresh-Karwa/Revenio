@@ -28,7 +28,9 @@ class DummyModule:
             return StopDecision(should_stop=True, stop_reason=StopReason.RESOLVED)
         return StopDecision(should_stop=False)
 
-    def diagnose(self, case: dict[str, Any]) -> Diagnosis:
+    def diagnose(
+        self, case: dict[str, Any], customer_history: list[dict[str, Any]] | None = None
+    ) -> Diagnosis:
         return Diagnosis(
             root_cause="dummy_fixed_cause",
             is_recoverable=True,

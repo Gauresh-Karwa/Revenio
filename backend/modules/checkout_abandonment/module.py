@@ -62,7 +62,20 @@ class CheckoutAbandonmentModule:
 
         return StopDecision(should_stop=False)
 
-    def diagnose(self, case: dict[str, Any]) -> Diagnosis:
+    def diagnose(
+        self, case: dict[str, Any], customer_history: list[dict[str, Any]] | None = None
+    ) -> Diagnosis:
+        # customer_history is accepted (required by the shared contract, see
+        # contract.py's DomainModule.diagnose) but deliberately UNUSED here.
+        # This is a documented scope decision, not an oversight: no
+        # cross-case behavioral signal (e.g. "this customer has abandoned
+        # checkout N times recently") has been built or tested for this
+        # domain yet — unlike subscription's customer_recent_failure_pressure,
+        # which was built AND empirically validated (see README's step 5
+        # section) before being wired in. Extending this domain the same
+        # way is a real, open follow-up, tracked in README's open items,
+        # not assumed to be either useful or not.
+        #
         # Enforcement point 1b of 2: checkout-starter filter, restated at the
         # diagnosis level so is_recoverable is correct even if this method is
         # ever called in isolation (e.g. from a future analytics/reporting

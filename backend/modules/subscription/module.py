@@ -16,7 +16,8 @@ from backend.core.contract import (
     StopDecision,
     StopReason,
 )
-from backend.ml.features import FEATURE_NAMES, build_feature_vector_from_case
+from backend.data.subscription_generator import compute_pressure_from_customer_history
+from backend.ml.features import FEATURE_NAMES_WITH_HISTORY, build_feature_vector_with_history
 
 SOFT_DECLINE_CODES: dict[str, str] = {
     "51": "insufficient_funds",
@@ -61,9 +62,9 @@ def _load_model_bundle(model_path: Path) -> dict | None:
     orchestrator and test suite.
 
     Also refuses a bundle whose feature schema doesn't match the module's
-    live FEATURE_NAMES: this is the concrete guard against the "model
-    trained on one feature set, module builds a different one, predictions
-    are silently wrong" failure mode.
+    live schema: this is the concrete guard against the "model trained on
+    one feature set, module builds a different one, predictions are
+    silently wrong" failure mode.
     """
     if not model_path.exists():
         return None
@@ -74,12 +75,13 @@ def _load_model_bundle(model_path: Path) -> dict | None:
     except Exception:
         return None
 
-    if bundle.get("feature_names") != FEATURE_NAMES:
+    if bundle.get("feature_names") != FEATURE_NAMES_WITH_HISTORY:
         warnings.warn(
             "Loaded model bundle's feature_names does not match the current "
-            "build_feature_vector schema — refusing to use it. Re-run "
-            "train_subscription_model.py to retrain against the current "
-            "feature set. Falling back to rule-based confidence only.",
+            "(enriched, with customer_recent_failure_pressure) schema — "
+            "refusing to use it. Re-run train_subscription_model.py to "
+            "retrain against the current feature set. Falling back to "
+            "rule-based confidence only.",
             stacklevel=2,
         )
         return None
@@ -111,7 +113,9 @@ class SubscriptionModule:
 
         return StopDecision(should_stop=False)
 
-    def _predict_recovery_probability(self, case: dict[str, Any], code: str) -> float | None:
+    def _predict_recovery_probability(
+        self, case: dict[str, Any], code: str, customer_recent_failure_pressure: float
+    ) -> float | None:
         """
         Only ever called for known soft codes. Model-agnostic: whichever
         model_type won at training time (GBM, MLP, or a future candidate),
@@ -121,11 +125,37 @@ class SubscriptionModule:
         if self._model_bundle is None:
             return None
         pipeline = self._model_bundle["pipeline"]
-        features = [build_feature_vector_from_case({**case, "decline_code": code})]
+        features = [
+            build_feature_vector_with_history(
+                decline_code=code,
+                attempt_number=case.get("attempt_number", 1),
+                hour_of_day=case.get("hour_of_day", 12),
+                is_near_payday=case.get("is_near_payday", False),
+                amount=case.get("amount", 0.0),
+                customer_recent_failure_pressure=customer_recent_failure_pressure,
+            )
+        ]
         return float(pipeline.predict_proba(features)[0][1])
 
-    def diagnose(self, case: dict[str, Any]) -> Diagnosis:
+    def diagnose(
+        self, case: dict[str, Any], customer_history: list[dict[str, Any]] | None = None
+    ) -> Diagnosis:
         code = case.get("decline_code")
+
+        # Cross-case signal: this customer's OTHER, past cases' terminal
+        # outcomes, in chronological order, replayed through the exact same
+        # causal EWMA the generator uses (single shared implementation —
+        # see subscription_generator.compute_pressure_from_customer_history
+        # — so training and inference can never silently drift apart on
+        # this math). customer_history is None/empty for a customer's first
+        # case, or when the orchestrator has no customer_id for this case —
+        # both correctly fall back to pressure=0.0 (neutral), not a guess.
+        past_case_outcomes = [
+            event.get("status") == "RECOVERED"
+            for event in (customer_history or [])
+            if event.get("_event_type") == "Outcome" and event.get("status") in ("RECOVERED", "LOST")
+        ]
+        customer_recent_failure_pressure = compute_pressure_from_customer_history(past_case_outcomes)
 
         if code in SOFT_DECLINE_CODES:
             raw_signal = {"decline_code": code, "source": "iso8583_soft_lookup"}
@@ -133,13 +163,17 @@ class SubscriptionModule:
                 # Audit visibility only (architecture doc 7.2 developer/audit
                 # view) — never branched on for behavior.
                 raw_signal["model_type"] = self._model_bundle["model_type"]
+            raw_signal["customer_recent_failure_pressure"] = customer_recent_failure_pressure
+            raw_signal["n_past_cases_considered"] = len(past_case_outcomes)
 
             return Diagnosis(
                 root_cause=SOFT_DECLINE_CODES[code],
                 is_recoverable=True,
                 confidence=0.95,
                 raw_signal=raw_signal,
-                predicted_recovery_probability=self._predict_recovery_probability(case, code),
+                predicted_recovery_probability=self._predict_recovery_probability(
+                    case, code, customer_recent_failure_pressure
+                ),
             )
 
         if code in HARD_DECLINE_CODES:
@@ -148,9 +182,6 @@ class SubscriptionModule:
                 is_recoverable=False,
                 confidence=0.95,
                 raw_signal={"decline_code": code, "source": "visa_category1_lookup"},
-                # No prediction: the model was never trained on hard-decline
-                # cases (they never reach a real retry), so scoring one
-                # would be meaningless, not just unavailable.
             )
 
         if code in STOP_INSTRUCTION_CODES:

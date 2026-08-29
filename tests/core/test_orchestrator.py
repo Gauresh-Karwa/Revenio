@@ -71,7 +71,7 @@ class HumanReviewModule:
     def check_stop(self, case: dict[str, Any], history: list[dict[str, Any]]) -> StopDecision:
         return StopDecision(should_stop=False)
 
-    def diagnose(self, case: dict[str, Any]) -> Diagnosis:
+    def diagnose(self, case: dict[str, Any], customer_history=None) -> Diagnosis:
         return Diagnosis(root_cause="low_confidence_case", is_recoverable=True, confidence=0.2)
 
     def decide(self, case, diagnosis, history) -> Decision:
@@ -111,7 +111,7 @@ class NeverStopsModule:
     def check_stop(self, case, history) -> StopDecision:
         return StopDecision(should_stop=False)
 
-    def diagnose(self, case) -> Diagnosis:
+    def diagnose(self, case, customer_history=None) -> Diagnosis:
         return Diagnosis(root_cause="loop_forever", is_recoverable=True, confidence=0.9)
 
     def decide(self, case, diagnosis, history) -> Decision:
