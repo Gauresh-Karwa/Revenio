@@ -83,6 +83,35 @@ def _code_51_amount_factor(amount: float) -> float:
     )
 
 
+# --- Support-email / hardship-disclosure signal ---
+SUPPORT_EMAIL_CONTACT_RATE = 0.15
+HARDSHIP_RATE_AMONG_CONTACTS = 0.30
+MIN_HARDSHIP_FACTOR = 0.55
+
+
+def _hardship_factor(has_hardship: bool) -> float:
+    return MIN_HARDSHIP_FACTOR if has_hardship else 1.0
+
+
+HARDSHIP_EMAIL_TEMPLATES = [
+    "I lost my job last week and can't cover this charge right now.",
+    "Going through a medical emergency, please give me some time.",
+    "I'm in a really tough financial situation at the moment.",
+    "My hours got cut and money is tight this month.",
+    "There's been a death in the family and finances are a mess right now.",
+    "Things have been really rough for us lately, could we work something out?",
+    "We're dealing with a hard stretch right now, hope you understand.",
+]
+
+NEUTRAL_EMAIL_TEMPLATES = [
+    "Can you tell me when my card will be charged again?",
+    "I'd like to update my payment method on file.",
+    "Please cancel my subscription for next month.",
+    "Why was my payment declined? My card should be fine.",
+    "I want to change my billing email address.",
+]
+
+
 @dataclass(frozen=True)
 class SubscriptionRecord:
     case_id: str
@@ -92,12 +121,11 @@ class SubscriptionRecord:
     attempt_number: int
     hour_of_day: int
     is_near_payday: bool
-    recovered: bool  # the label — stochastic, see module docstring
-    # NEW, additive, defaults to 0.0 (neutral): only populated when
-    # generate_subscription_dataset(include_customer_history=True) is used.
-    # 0.0 for every record from a default call — byte-identical to before
-    # this field existed, since _customer_history_factor(0.0) == 1.0.
+    recovered: bool
     customer_recent_failure_pressure: float = 0.0
+    has_support_email: bool = False
+    email_text: str | None = None
+    true_hardship: bool = False
 
 
 def _pick_decline_code(rng: random.Random) -> str:
@@ -124,6 +152,7 @@ def true_recovery_probability(
     rates: dict[str, float] | None = None,
     payday_boost: float = PAYDAY_BOOST,
     customer_recent_failure_pressure: float = 0.0,
+    has_hardship: bool = False,
 ) -> float:
     """
     The exact probability _sample_recovered draws against — extracted as its
@@ -159,6 +188,7 @@ def true_recovery_probability(
         p *= _code_51_amount_factor(amount)
 
     p *= _customer_history_factor(customer_recent_failure_pressure)
+    p *= _hardship_factor(has_hardship)
 
     return max(0.02, min(0.97, p))
 
@@ -173,6 +203,7 @@ def _sample_recovered(
     rates: dict[str, float] | None = None,
     payday_boost: float = PAYDAY_BOOST,
     customer_recent_failure_pressure: float = 0.0,
+    has_hardship: bool = False,
 ) -> bool:
     if decline_code not in (rates or CODE_BASE_RECOVERY_RATE):
         return False
@@ -181,6 +212,7 @@ def _sample_recovered(
         decline_code, amount, attempt_number, hour_of_day, is_near_payday,
         rates=rates, payday_boost=payday_boost,
         customer_recent_failure_pressure=customer_recent_failure_pressure,
+        has_hardship=has_hardship,
     )
     return rng.random() < p
 
@@ -192,24 +224,13 @@ def generate_subscription_dataset(
     base_recovery_override: dict[str, float] | None = None,
     payday_boost_override: float | None = None,
     include_customer_history: bool = False,
+    include_support_email_signal: bool = False,
 ) -> list[SubscriptionRecord]:
     """
     base_recovery_override / payday_boost_override exist ONLY so a second,
     deliberately different-parameter "regime B" dataset can be generated for
     the cross-distribution generalization test (architecture doc 5.1) —
     never used for the primary training dataset.
-
-    include_customer_history (default False, added after the sequence-model
-    comparison found customer-history to be real, exploitable signal — see
-    generate_subscription_retry_sequences' docstring for the full grounding):
-    when True, a customer's failure rows are treated as chronologically
-    ordered, and customer_recent_failure_pressure (the same causal,
-    recency-weighted EWMA used by the chain generator) is tracked per
-    customer and threaded into each row's true_recovery_probability. When
-    False (the default), NO extra randomness is consumed and every row's
-    pressure is exactly 0.0 — output is byte-identical to before this
-    parameter existed, so every already-recorded oracle/GBM/NN number in
-    README.md computed from the default call remains valid.
     """
     rng = random.Random(seed)
     rates = dict(CODE_BASE_RECOVERY_RATE)
@@ -223,21 +244,32 @@ def generate_subscription_dataset(
     for customer_index in range(n_customers):
         customer_id = f"cust-{customer_index:05d}"
         n_failures = rng.randint(0, max_failures_per_customer)
-        pressure = 0.0  # neutral; only ever updated when include_customer_history=True
+        pressure = 0.0
 
         for _ in range(n_failures):
             decline_code = _pick_decline_code(rng)
-            amount = round(rng.lognormvariate(mu=CODE_51_AMOUNT_MU, sigma=0.6), 2)  # realistic right-skewed spend
+            amount = round(rng.lognormvariate(mu=CODE_51_AMOUNT_MU, sigma=0.6), 2)
             attempt_number = rng.randint(1, 3)
             hour_of_day = rng.randint(0, 23)
             is_near_payday = rng.random() < 0.3
 
             row_pressure = pressure if include_customer_history else 0.0
 
+            has_support_email = False
+            email_text = None
+            true_hardship = False
+            if include_support_email_signal:
+                has_support_email = rng.random() < SUPPORT_EMAIL_CONTACT_RATE
+                if has_support_email:
+                    true_hardship = rng.random() < HARDSHIP_RATE_AMONG_CONTACTS
+                    template_bank = HARDSHIP_EMAIL_TEMPLATES if true_hardship else NEUTRAL_EMAIL_TEMPLATES
+                    email_text = rng.choice(template_bank)
+
             recovered = _sample_recovered(
                 rng, decline_code, amount, attempt_number, hour_of_day, is_near_payday,
                 rates=rates, payday_boost=payday_boost,
                 customer_recent_failure_pressure=row_pressure,
+                has_hardship=true_hardship,
             )
 
             case_counter += 1
@@ -252,6 +284,9 @@ def generate_subscription_dataset(
                     is_near_payday=is_near_payday,
                     recovered=recovered,
                     customer_recent_failure_pressure=row_pressure,
+                    has_support_email=has_support_email,
+                    email_text=email_text,
+                    true_hardship=true_hardship,
                 )
             )
 
