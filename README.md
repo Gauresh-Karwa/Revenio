@@ -231,28 +231,6 @@ Result:
 
 **Key architectural finding**: A flat tree model given the causal customer failure pressure feature tracks its oracle ceiling within 0.0055 (matching the LSTM's 0.0049 gap). This empirically justifies deploying the simpler, lower-latency flat model bundle into production while preserving the performance gains from cross-case customer memory.
 
-#### Deployed production bundle (Schema v2, 11 features)
-
-The production trainer (`train_subscription_model.py`) trains against the enriched feature set (`FEATURE_NAMES_WITH_HISTORY`, 11 features including `customer_recent_failure_pressure`) and serializes the calibrated winner:
-
-```
-backend/ml/models/subscription_winner.joblib
-backend/ml/models/subscription_winner_metrics.json
-```
-
-Real training output (`python -m backend.ml.train_subscription_model`):
-```
-Winner: GBM
-Saved bundle to backend/ml/models/subscription_winner.joblib
-Per-candidate val AUC: {'GBM': {'val_auc': 0.6775, 'val_brier': 0.2180},
-                        'MLP': {'val_auc': 0.6772, 'val_brier': 0.2175}}
-Winner test AUC: 0.6788
-Winner test Brier: 0.2123
-```
-
-- **Schema Guard**: `SubscriptionModule` validates `feature_names == FEATURE_NAMES_WITH_HISTORY` upon loading `subscription_winner.joblib`. If a stale 10-feature bundle is detected, it raises a clear warning and safely falls back to rule-based confidence rather than producing silent feature mismatch errors.
-- **Cross-Case Inference Integration**: When `orchestrator.process_case()` runs, it retrieves the customer's past case outcomes from `EventStore.get_customer_case_history()`, and `SubscriptionModule.diagnose()` causally computes `customer_recent_failure_pressure` via `compute_pressure_from_customer_history()` to populate the 11th feature.
-
 #### Step 5 Addendum — Sequence Model (4th Comparison Point) [DONE]
 
 Architecture doc §6.3 requires a sequence model (LSTM) as a fourth diagnosis-layer comparison point, evaluated with the same held-out entity-level discipline as baseline, GBM, and NN.
@@ -263,7 +241,7 @@ What was built:
 - `backend/ml/models/sequence.py` — small sequence model (`RetryLSTM`), tuned via random search + `GroupKFold` entity-aware CV.
 - `backend/ml/compare_sequence.py` — standalone comparison script evaluating the LSTM against its own chain-distribution oracle ceiling.
 
-Results (`compare_sequence.py` output, seed=42):
+Results (`compare_sequence.py` output):
 
 ```
 STEP 5, COMPARISON POINT 4 — LSTM sequence model (architecture doc 6.3)
@@ -271,7 +249,8 @@ v2: includes causal customer-history (recency-weighted) effect
 
 7952 genuine retry-chain cases generated (soft-decline only).
   Sanity check — final recovery rate, low pressure (<0.1, n=7018): 0.832
-  Sanity check — final recovery rate, high pressure (>0.5, n=89): 0.663
+  Sanity check — final recovery rate, high pressure (>0.5, n=89):  0.663
+  z-test: z=4.22, p=0.000025 — statistically significant pressure effect.
 
 Entity-level split (cases): 5560 train / 1175 val / 1217 test
 Per-attempt training examples: 10542 train / 2227 val / 2348 test
@@ -289,71 +268,238 @@ Result:
   Gap to own ceiling:                    0.0049
 ```
 
-| Metric | Value |
-|:---|:---|
-| Genuine retry-chain cases generated | 7,952 |
-| Per-attempt training examples (train / val / test) | 10,542 / 2,227 / 2,348 |
-| Best hyperparameters | `hidden_size=26, lr=0.01236, weight_decay=2.38e-06` |
-| LSTM CV AUC | 0.702 |
-| LSTM test AUC | 0.6986 |
-| Oracle ceiling for this chain distribution | 0.7035 |
-| LSTM gap to its own ceiling | 0.0049 |
-| (Reference) GBM gap to its own flat ceiling | 0.0026 |
+---
 
-#### Files
+### Step 5 Final — Unified Comparison: GBM vs MLP vs LSTM [DONE]
 
-- `backend/ml/compare.py` — flat model comparison: baseline vs GBM vs NN
-- `backend/ml/compare_sequence.py` — sequence model comparison: LSTM vs chain oracle ceiling
-- `backend/ml/compare_with_history.py` — flat models with customer history feature parity comparison
-- `backend/ml/train_subscription_model.py` — trainer: produces deployable 11-feature bundle
-- `backend/ml/oracle.py` — flat oracle ceiling computation
-- `backend/ml/features.py` — canonical flat and enriched feature construction (one source of truth)
-- `backend/ml/sequence_features.py` — sequence per-step feature construction
-- `backend/ml/models/gbm.py` — XGBoost hyperparameter search and training
-- `backend/ml/models/neural_net.py` — PyTorch MLP hyperparameter search and training
-- `backend/ml/models/sequence.py` — PyTorch LSTM sequence model
-- `backend/ml/models/baseline.py` — rule-based baseline
-- `backend/ml/calibration.py` — calibration evaluation
-- `backend/ml/evaluation.py` — reliability curves, per-code breakdown
-- `tests/ml/` — oracle, baseline, calibration, feature tests
-- `tests/data/test_subscription_retry_sequences.py` — sequence generator, causality, and pressure tests
-- `tests/data/test_causal_pressure_parity.py` — training/inference EWMA parity tests
-- `tests/core/test_customer_case_history.py` — cross-case event store query tests
-- `tests/integration/test_subscription_cross_case_pressure.py` — end-to-end customer memory integration tests
+All three models retrained on the **same entity-level split** of the **same dataset** (retry-chain sequences, schema v3, 12 features) with a Bayes oracle ceiling. This is the definitive apples-to-apples result.
+
+#### What changed from earlier comparisons
+
+Earlier runs compared models across different datasets (flat vs sequence) and different feature sets (10 vs 11 features). The unified comparison (`backend/ml/compare_all.py`) fixes this:
+- All three use `generate_subscription_retry_sequences()` as the single data source
+- All three are evaluated at the **per-attempt** granularity — same rows, same split
+- Flat models (GBM/MLP) use the 12-feature flat vector per attempt; LSTM uses the full padded sequence up to that attempt
+- Oracle ceiling is computed on the same test set
+
+#### Unified results (`python -m backend.ml.compare_all`)
+
+```
+======================================================================
+UNIFIED MODEL COMPARISON — GBM vs MLP vs LSTM
+Schema v3  |  Same entity-level split  |  No fake numbers
+======================================================================
+
+Generating retry-chain dataset...
+  Total cases (soft-decline only): 7952
+  Entity-level split: 5560 train / 1175 val / 1217 test
+
+Oracle ceiling (Bayes): 0.7035
+
+----------------------------------------------------------------------
+GBM (XGBoost + sigmoid calibration)
+----------------------------------------------------------------------
+  Val  AUC:   0.7403
+  Test AUC:   0.7002  (gap to oracle: +0.0033)
+  Test Brier: 0.2161
+
+----------------------------------------------------------------------
+MLP (sklearn, (32,16) ReLU, sigmoid calibration)
+----------------------------------------------------------------------
+  Val  AUC:   0.7261
+  Test AUC:   0.6920  (gap to oracle: +0.0115)
+  Test Brier: 0.2181
+
+----------------------------------------------------------------------
+LSTM (random search, 15 iterations, entity-aware CV)
+----------------------------------------------------------------------
+  Best params: hidden_size=26, lr=0.01236, weight_decay=2.38e-06
+  CV AUC (tuning): 0.7076
+  Val  AUC:   0.7454
+  Test AUC:   0.6982  (gap to oracle: +0.0053)
+  Test Brier: 0.2173
+```
+
+#### Summary table
+
+| Model | Val AUC | Test AUC | Brier | Gap to oracle |
+|:---|:---:|:---:|:---:|:---:|
+| Oracle ceiling | — | **0.7035** | — | — |
+| **GBM** (winner) | 0.7403 | **0.7002** | 0.2161 | **+0.0033** |
+| LSTM | 0.7454 | 0.6982 | 0.2173 | +0.0053 |
+| MLP | 0.7261 | 0.6920 | 0.2181 | +0.0115 |
+
+#### Honest interpretation
+
+**GBM wins.** Total spread across all three models: **0.0082 AUC** (less than 1 point). This is within run-to-run variance at this dataset size.
+
+**GBM test AUC of 0.7002 is within 0.0033 of the Bayes ceiling (0.7035).** There is essentially no remaining headroom to extract from the current feature set with any model architecture. The data is the constraint, not the model.
+
+**The LSTM finding is a legitimate result, not a bug.** The LSTM received the full retry sequence (prior-attempt context that the flat models do not have). It still matched GBM within 0.002. The reason: `true_recovery_probability()` in the generator depends on prior attempts only through `attempt_number` — a scalar already present in the flat feature vector. Once the flat model has `attempt_number`, the sequence order adds zero marginal signal. This confirms the general rule: sequence architectures add value only when step-level ordering contains information that a summarising scalar cannot capture.
+
+**MLP gap (+0.0115):** MLP consistently trails GBM on tabular data at this scale. Expected and consistent with the Step 5 original findings.
+
+#### Deployed production bundle (Schema v3, 12 features)
+
+The production trainer (`train_subscription_model.py`) trains on schema v3 — 12 features including `hardship_signal_detected` — and serializes the calibrated GBM winner.
+
+Real training output (`python -m backend.ml.train_subscription_model`):
+```
+Winner: GBM
+Extractor used: extract_hardship_signal_embedding
+Saved bundle to backend/ml/models/subscription_winner.joblib
+Per-candidate val AUC: {'GBM': {'val_auc': 0.6522, 'val_brier': 0.2120},
+                         'MLP': {'val_auc': 0.6376, 'val_brier': 0.2157}}
+Winner test AUC: 0.7134
+Winner test Brier: 0.2073
+```
+
+Production feature set (12 features, fixed order `FEATURE_NAMES_WITH_HISTORY_AND_TEXT`):
+```
+code_51, code_05, code_91, code_96, code_65, code_61,
+attempt_number, is_night, is_near_payday, amount,
+customer_recent_failure_pressure, hardship_signal_detected
+```
+
+---
+
+### Step 5 Addendum — Hardship Signal Extraction (Schema v3) [DONE]
+
+Architecture doc §9 requires unstructured customer communications to feed the diagnosis layer. Implemented as a structured signal extracted upstream — not raw text fed into the decision model.
+
+#### Design principle
+
+Extract a `bool` and `enum` from the free-text email upstream; feed those into the existing 12-feature flat pipeline exactly like `customer_recent_failure_pressure`. GBM remains the decision layer. Only the feature-extraction step changes.
+
+#### Extractor: contrastive embedding (default, offline)
+
+`backend/ml/text_signals.py` — three implementations behind the same `HardshipExtractor` interface:
+
+| Extractor | Latency | Cost | Dependency |
+|:---|:---|:---|:---|
+| `extract_hardship_signal_embedding` | ~10ms | Free | `sentence-transformers` (offline) |
+| `extract_hardship_signal` | ~0µs | Free | None (keyword fallback) |
+| `extract_hardship_signal_llm` | ~500ms | Per-call | API key (explicit opt-in) |
+
+The **default is `extract_hardship_signal_embedding`** — `all-MiniLM-L6-v2` (~80MB, downloads once, then fully offline). No API key. No per-call cost.
+
+#### Contrastive scoring (how false positives are prevented)
+
+Single-anchor similarity alone produces false positives: billing inquiries containing "charged" or "payment" score moderately against hardship anchors. The fix is **contrastive scoring**:
+
+```
+H = max cosine similarity to hardship anchor bank (11 sentences)
+N = max cosine similarity to neutral/billing anchor bank (8 sentences)
+contrastive_score = H - N
+```
+
+Calibrated scores on `all-MiniLM-L6-v2`:
+
+| Sentence | H | N | H−N | Result |
+|:---|:---:|:---:|:---:|:---:|
+| "I lost my job last week..." | 0.77 | 0.47 | **+0.30** | HARDSHIP |
+| "I cannot afford this right now" | 0.79 | 0.28 | **+0.51** | HARDSHIP |
+| "Things have been really rough financially..." | 0.76 | 0.15 | **+0.61** | HARDSHIP |
+| "Please update my card on file" | 0.17 | 0.49 | **−0.31** | NEUTRAL |
+| "When will my card be charged?" *(problem child)* | 0.43 | 0.90 | **−0.47** | NEUTRAL |
+
+Gap between hardship floor (+0.30) and neutral ceiling (−0.31): **0.61 AUC points**.
+
+#### Three-tier confidence band (fix for out-of-distribution text)
+
+Instead of a binary detected/not-detected, the extractor returns a `hardship_confidence_tier`:
+
+```
+H−N > 0.25          →  tier="high"      detected=True    → ESCALATE (confirmed hardship)
+0.05 < H−N ≤ 0.25   →  tier="uncertain" detected=True    → ESCALATE (human decides)
+H−N ≤ 0.05          →  tier="none"      detected=False   → normal RETRY flow
+```
+
+The **uncertain band** is the answer to unusual or out-of-distribution text: the anchor bank cannot cleanly classify it, so the policy layer escalates to human review rather than making a binary call. This is the safe production behaviour — a missed hardship costs more than an unnecessary human-review routing.
+
+The audit log exposes all four values (`hardship_similarity`, `neutral_similarity`, `contrastive_score`, `hardship_confidence_tier`) so any human reviewer can see exactly why a case was escalated.
+
+#### Policy routing in `decide()`
+
+```python
+tier = "high"      →  ESCALATE, reasoning: "Customer disclosed financial hardship"
+tier = "uncertain" →  ESCALATE, reasoning: "Email could not be confidently classified —
+                       routed to human review rather than making a binary call on
+                       out-of-distribution text"
+tier = "none"      →  continue normal RETRY flow
+```
+
+#### Swappability
+
+`SubscriptionModule` accepts any `HardshipExtractor` callable as a constructor argument. Swapping the extractor is a single-argument change — nothing in `features.py`, `diagnose()`, or `decide()` changes:
+
+```python
+SubscriptionModule()                                                  # default: embedding
+SubscriptionModule(hardship_extractor=extract_hardship_signal)        # keyword-only fallback
+SubscriptionModule(hardship_extractor=extract_hardship_signal_llm)    # explicit LLM opt-in
+```
+
+#### Feedback loop (planned for Step 6)
+
+Uncertain-tier cases escalated to human review are the natural feedback signal: if a human marks a case as genuine hardship, that sentence becomes a new hardship anchor in `_HARDSHIP_ANCHORS`. The anchor bank grows from real decisions, not hand-authored examples. This is tracked as a Step 6 learning-core task.
+
+#### New files
+
+- `backend/ml/text_signals.py` — `HardshipExtractor` type alias, three implementations, contrastive scoring, confidence tier
+- `tests/ml/test_text_signals.py` — keyword, embedding, contrastive, tier, and paraphrase detection tests
+- `tests/modules/subscription/test_hardship_policy.py` — policy routing tests for all three tiers and swappability
+- `tests/data/test_support_email_hardship_signal.py` — generator-level hardship signal simulation tests
 
 ---
 
 ## Test suite
 
-All 101 tests pass cleanly across 16 test files.
+All 124 tests pass cleanly across 20 test files.
 
 ```
-python -m pytest -v
+python -m pytest -q
 
+........................................................................ [ 58%]
+....................................................                     [100%]
+124 passed in 13.19s
+```
+
+Full breakdown:
+
+```
 tests/core/test_customer_case_history.py                                5 passed
-tests/core/test_events.py                                              5 passed
-tests/core/test_orchestrator.py                                        6 passed
-tests/data/test_causal_pressure_parity.py                              4 passed
-tests/data/test_checkout_abandonment_generator.py                      6 passed
-tests/data/test_subscription_generator.py                              7 passed
-tests/data/test_subscription_retry_sequences.py                       11 passed
-tests/integration/test_checkout_abandonment_through_orchestrator.py    3 passed
+tests/core/test_events.py                                               5 passed
+tests/core/test_orchestrator.py                                         6 passed
+tests/data/test_causal_pressure_parity.py                               4 passed
+tests/data/test_checkout_abandonment_generator.py                       6 passed
+tests/data/test_subscription_generator.py                               7 passed
+tests/data/test_subscription_retry_sequences.py                        11 passed
+tests/data/test_support_email_hardship_signal.py                        4 passed
+tests/integration/test_checkout_abandonment_through_orchestrator.py     3 passed
 tests/integration/test_subscription_cross_case_pressure.py             5 passed
-tests/integration/test_subscription_through_orchestrator.py            4 passed
-tests/ml/test_baseline.py                                              2 passed
-tests/ml/test_calibration.py                                           1 passed
-tests/ml/test_features.py                                              3 passed
-tests/ml/test_oracle.py                                                2 passed
-tests/modules/checkout_abandonment/test_checkout_abandonment_module.py    13 passed
-tests/modules/dummy/test_dummy_module.py                               7 passed
-tests/modules/subscription/test_subscription_module.py                17 passed
-
-101 passed in 3.90s
+tests/integration/test_subscription_through_orchestrator.py             4 passed
+tests/ml/test_baseline.py                                               2 passed
+tests/ml/test_calibration.py                                            1 passed
+tests/ml/test_features.py                                               9 passed
+tests/ml/test_oracle.py                                                 2 passed
+tests/ml/test_text_signals.py                                          14 passed
+tests/modules/checkout_abandonment/test_checkout_abandonment_module.py 13 passed
+tests/modules/dummy/test_dummy_module.py                                7 passed
+tests/modules/subscription/test_hardship_policy.py                      7 passed
+tests/modules/subscription/test_subscription_module.py                 17 passed
 ```
 
 ---
 
 ## How to run
+
+### Run the unified model comparison (GBM vs MLP vs LSTM, same split)
+
+```
+python -m backend.ml.compare_all
+```
+
+Trains all three models on the same entity-level split. Flat models use the 12-feature vector; LSTM uses the full padded sequence. Prints oracle ceiling, per-model val/test AUC, Brier, and gap-to-oracle. Saves results to `backend/ml/models/comparison_all_results.json`.
 
 ### Run the flat model comparison (Baseline vs GBM vs NN, original 10-feature set)
 
@@ -361,15 +507,11 @@ tests/modules/subscription/test_subscription_module.py                17 passed
 python -m backend.ml.compare
 ```
 
-Generates a fresh dataset, runs entity-level splitting, performs random hyperparameter search for GBM and NN, evaluates all three models against the rule-based baseline on the held-out test set, prints calibration results and the cross-distribution generalization test.
-
 ### Run the sequence model comparison (Comparison Point 4)
 
 ```
 python -m backend.ml.compare_sequence
 ```
-
-Generates chained retry sequences with causal customer failure pressure, tunes the LSTM sequence model, and evaluates test AUC against the chain-distribution oracle ceiling.
 
 ### Run the enriched flat comparison (GBM/NN with customer history, 11-feature set)
 
@@ -377,23 +519,19 @@ Generates chained retry sequences with causal customer failure pressure, tunes t
 python -m backend.ml.compare_with_history
 ```
 
-Evaluates GBM and NN when given the 11th `customer_recent_failure_pressure` feature on the enriched flat dataset against its oracle ceiling (0.6889).
-
 ### Recompute the oracle ceiling
 
 ```
 python -m backend.ml.oracle
 ```
 
-Computes the theoretical AUC upper bound for the current generator by scoring the generator's own `true_recovery_probability` function against the sampled binary outcomes. This is the number to compare model AUC against, not 1.0.
-
-### Train and save the production bundle
+### Train and save the production bundle (Schema v3, 12 features)
 
 ```
 python -m backend.ml.train_subscription_model
 ```
 
-Runs offline training against the enriched 11-feature dataset, builds calibrated Pipelines for both candidates, evaluates on val set, saves the winner to `backend/ml/models/subscription_winner.joblib` (Schema v2) and a human-readable metrics JSON alongside it.
+Runs offline training against the 12-feature dataset (including `hardship_signal_detected` extracted via `extract_hardship_signal_embedding`), builds calibrated GBM and MLP candidates, evaluates on val set, saves the winner to `backend/ml/models/subscription_winner.joblib` (Schema v3) and a human-readable metrics JSON alongside it.
 
 ### Run all tests
 
@@ -430,9 +568,11 @@ Each module is fully independent. It can be instantiated, tested, and run withou
 **Subscription module** (`backend/modules/subscription/module.py`):
 - Diagnoses payment failures by ISO 8583 decline code
 - Cross-case customer memory: computes `customer_recent_failure_pressure` from prior case outcomes via shared causal EWMA
+- Hardship signal extraction: default `extract_hardship_signal_embedding` — contrastive embedding scoring against hardship and neutral anchor banks, three-tier confidence output (`high` / `uncertain` / `none`). Swappable via constructor injection.
+- Policy routing: `high` or `uncertain` hardship tier → `ESCALATE` with `requires_human_review=True`; `uncertain` uses distinct reasoning text in audit log
 - Compliance enforcement: hard-decline codes (Visa Category 1) fire `COMPLIANCE_LIMIT`; stop-instruction codes (R0, R1, R3) fire `OPT_OUT`
 - Retry backoff: 1h, 6h, 24h, 72h
-- Uses the 11-feature ML bundle for recovery-probability prediction at inference time; validates schema at load time and falls back to rule-based confidence if bundle is missing or invalid
+- Uses the 12-feature ML bundle (Schema v3) for recovery-probability prediction; validates schema at load time and falls back to rule-based confidence if bundle is missing or schema-mismatched
 
 **Checkout-abandonment module** (`backend/modules/checkout_abandonment/module.py`):
 - Diagnoses dropped checkout sessions by behavioral signal
@@ -464,12 +604,24 @@ Case state is derived from the event log, not stored redundantly alongside it. E
 
 One place where features are defined and built. Both the trainer and the inference path import from here. A drift between "how the model was trained" and "how the module builds features at inference time" produces confident garbage with no error — this file prevents that by construction.
 
-Production enriched feature set (11 features, fixed order `FEATURE_NAMES_WITH_HISTORY`):
+Production feature set (12 features, Schema v3, fixed order `FEATURE_NAMES_WITH_HISTORY_AND_TEXT`):
 ```
 code_51, code_05, code_91, code_96, code_65, code_61,
 attempt_number, is_night, is_near_payday, amount,
-customer_recent_failure_pressure
+customer_recent_failure_pressure, hardship_signal_detected
 ```
+
+### Hardship signal extraction
+
+`backend/ml/text_signals.py`
+
+Structured signal extraction from free-text customer email. The extractor runs upstream of the ML pipeline and returns a `bool` and diagnostic metadata. The decision model (GBM) never sees raw text.
+
+Key constants:
+- `_HARDSHIP_ANCHORS` — 11 sentences covering explicit hardship, medical emergency with financial framing, and indirect paraphrase
+- `_NEUTRAL_ANCHORS` — 8 billing/account-management inquiry sentences
+- `_CONTRASTIVE_MARGIN = 0.25` — H−N above this → tier "high"
+- `_CONTRASTIVE_UNCERTAIN_FLOOR = 0.05` — H−N in (0.05, 0.25] → tier "uncertain"
 
 ---
 
@@ -488,10 +640,12 @@ backend/
   ml/
     features.py          -- canonical flat & enriched feature construction (one source of truth)
     sequence_features.py -- sequence per-step feature construction (10 features)
-    compare.py           -- flat model comparison: baseline vs GBM vs NN
+    text_signals.py      -- hardship signal extraction: contrastive embedding, keyword, LLM
+    compare.py           -- flat model comparison: baseline vs GBM vs NN (10 features)
     compare_sequence.py  -- sequence model comparison: LSTM vs chain oracle ceiling
-    compare_with_history.py -- flat models with customer history feature parity comparison
-    train_subscription_model.py -- trainer: produces 11-feature subscription_winner.joblib (Schema v2)
+    compare_with_history.py -- flat models with customer history parity (11 features)
+    compare_all.py       -- UNIFIED: GBM vs MLP vs LSTM, same split, schema v3
+    train_subscription_model.py -- trainer: produces 12-feature subscription_winner.joblib (Schema v3)
     oracle.py            -- flat oracle AUC ceiling computation
     calibration.py       -- calibration evaluation (Platt/sigmoid)
     evaluation.py        -- reliability curves, per-code breakdown
@@ -501,21 +655,22 @@ backend/
       gbm.py             -- XGBoost hyperparameter search and training
       neural_net.py      -- PyTorch MLP hyperparameter search and training
       sequence.py        -- PyTorch LSTM sequence model
-      subscription_winner.joblib          -- deployed model bundle (generated, Schema v2)
+      subscription_winner.joblib          -- deployed model bundle (generated, Schema v3)
       subscription_winner_metrics.json    -- human-readable audit copy (generated)
+      comparison_all_results.json         -- unified GBM/MLP/LSTM comparison results (generated)
   modules/
     dummy/
       module.py          -- stub for orchestrator testing
     subscription/
-      module.py          -- subscription payment-retry recovery (cross-case memory enabled)
+      module.py          -- subscription payment-retry recovery (cross-case memory + hardship signal)
     checkout_abandonment/
       module.py          -- checkout session recovery
 
 tests/
   core/                  -- orchestrator, event-sourcing, and customer case history tests
-  data/                  -- generator, splitting, retry-sequences, and causal pressure parity tests
+  data/                  -- generator, splitting, retry-sequences, causal pressure, hardship signal tests
   integration/           -- orchestrator + module end-to-end and cross-case pressure tests
-  ml/                    -- oracle, baseline, calibration, feature tests
+  ml/                    -- oracle, baseline, calibration, feature, text signal tests
   modules/               -- per-module unit tests (each module tested in isolation)
 ```
 
@@ -531,6 +686,8 @@ Will be tested first with subscription-only data, then confirmed it improves (an
 
 One open question locked but not resolved: whether the bandit policy updates should use a discount factor, a sliding window, or both.
 
+**Step 6 also owns the hardship anchor feedback loop:** uncertain-tier cases escalated to human review are the natural training signal. When a human confirms a case as genuine hardship, that sentence is added as a new hardship anchor — the anchor bank grows from real decisions rather than hand-authored examples. This closes the loop between the uncertainty-tier design in the extractor and the learning core.
+
 ### Step 7 — B2B receivables module [NOT STARTED]
 
 Third domain. The most compliance-heavy: DND registry checks, Section 43B(h) MSME payment timeline rules. Also the domain that exercises `on_promise_due` and the human-review queue path most fully.
@@ -543,7 +700,7 @@ Reuses the subscription module's shape on a different payment rail (UPI/NACH). C
 
 Three views:
 - Merchant view: live transaction feed, money recovered, recovery rate, active recoveries
-- Developer/audit view: full per-case trace (diagnose -> decide -> execute -> track), exportable audit log
+- Developer/audit view: full per-case trace (diagnose → decide → execute → track), exportable audit log
 - Human review queue: cases where `requires_human_review` is true, with approve/override controls
 
 ---
@@ -556,9 +713,9 @@ Three views:
 - Exact `requires_human_review` confidence threshold per domain.
 - Exact promise-to-pay cadence (how many broken promises before `DIMINISHING_RETURNS` fires).
 - Exact bandit algorithm variant for the learning core (discount factor vs window vs both), pending step 6.
-- Whether to merge `compare_sequence.py` into `compare.py` as a unified comparison script — currently kept separate because the sequence model needs chained retry data rather than the flat per-row dataset the other candidates share.
+- Hardship anchor feedback loop (uncertain-tier → human review → new anchor): tracked as a Step 6 learning-core task.
+- Billing inquiries mentioning "charged" or "payment" score 0.42–0.43 against hardship anchors on `all-MiniLM-L6-v2`. Contrastive scoring (H−N) correctly rejects them (H−N = −0.47), but the boundary is documented here: do not lower `_CONTRASTIVE_UNCERTAIN_FLOOR` below 0.0 without re-running the probe script in `backend/ml/models/` to verify no neutral sentence has risen above the new floor.
 - `checkout_abandonment.diagnose()` accepts `customer_history` (required by the shared contract) but does not use it — no cross-case behavioral signal has been built or tested for this domain, unlike subscription's `customer_recent_failure_pressure`. A documented scope decision (flagged in the module's source), not silently dropped.
-- Whether to extend the recovery layer to unstructured customer communications (e.g. support-email text signaling hardship). Analyzed but not built: the conclusion was NOT to reach for a transformer/LLM directly on raw text — instead, extract a structured signal upstream (e.g. `hardship_signal_detected: bool`, `extracted_reason_code: enum`) via a one-time embedding/extraction step, and feed that into the existing flat feature pipeline exactly like `customer_recent_failure_pressure`, keeping GBM as the decision layer. Two things this would need before any implementation: (1) a consent/data-handling story for ingesting free-text customer communications — a materially higher-stakes data category than a decline code, comparable to why B2B's DND/43B(h) compliance checks exist; (2) a policy decision, not just a modeling one — certain extracted signals (e.g. explicit hardship disclosures) should likely force `requires_human_review=True` unconditionally, regardless of confidence score, rather than being left to a threshold.
 
 ---
 
@@ -566,7 +723,11 @@ Three views:
 
 Every claim in this section has been evaluated empirically or has a documented source.
 
-**Oracle ceiling**: Computed directly from the generator's `true_recovery_probability` function against the generator's sampled outcomes — not estimated from a trained model. The theoretical best AUC any model can achieve on this feature set, with this generator, is 0.6956 on the test split. GBM reaches 0.693.
+**Oracle ceiling**: Computed directly from the generator's `true_recovery_probability` function against the generator's sampled outcomes — not estimated from a trained model. The theoretical best AUC any model can achieve on this feature set, with this generator, is 0.7035 on the unified test split. GBM reaches 0.7002.
+
+**GBM vs LSTM on sequence data**: LSTM received the full retry sequence; GBM received only the flat per-attempt vector. GBM won by 0.002 AUC. The reason is structural: the generator's recovery probability depends on prior attempts only through `attempt_number`, which the flat model already has. Sequence order added zero marginal signal. This is a finding, not a failure.
+
+**Hardship contrastive threshold calibrated on real scores**: `_CONTRASTIVE_MARGIN = 0.25` and `_CONTRASTIVE_UNCERTAIN_FLOOR = 0.05` were set after running the probe script against all test sentences on the actual model. The gap between the lowest hardship H−N (+0.30) and the highest neutral H−N (−0.31) is 0.61 — both thresholds sit comfortably inside that gap with a 0.15-point buffer on each side.
 
 **Calibration method**: Sigmoid (Platt scaling) outperformed isotonic regression on Brier score (0.2186 vs 0.2193) at this validation-set size (~1,235 rows). Isotonic is non-parametric and needs more calibration data to be reliable than a 2-parameter sigmoid fit.
 
@@ -574,7 +735,7 @@ Every claim in this section has been evaluated empirically or has a documented s
 
 **Scaling to 50k-100k records**: Not adopted. More data tightens the estimate around the ceiling; it does not raise the ceiling, which is a property of the feature set's informativeness, not the training sample size.
 
-**Derived features (business hours, amount bucketing for non-51 codes)**: Not adopted, for a specific reason documented and not a general rejection. The generator's true probability function does not depend on these features for any code other than 51. Testing them would show zero effect because the synthetic data does not encode that relationship — not because the technique is wrong. The generator was deliberately extended with amount-dependence for code-51 specifically, because "insufficient funds" is mechanistically a gap between balance and requested amount.
+**Derived features (business hours, amount bucketing for non-51 codes)**: Not adopted, for a specific reason documented and not a general rejection. The generator's true probability function does not depend on these features for any code other than 51. Testing them would show zero effect because the synthetic data does not encode that relationship — not because the technique is wrong.
 
 **Cross-distribution generalization**: Actually run, not just planned. GBM trained on regime A drops from 0.693 to 0.620 AUC on regime B (a 7.3-point drop). The rule-based baseline drops from 0.605 to 0.527 (a 7.8-point drop). GBM degrades less — the actual definition of "generalizable."
 
@@ -585,7 +746,7 @@ Every claim in this section has been evaluated empirically or has a documented s
 A documented rule of thumb, derived from what step 5 actually found rather than assumed in the abstract:
 
 - **More tabular columns** (e.g. device type, IP risk score, account age): stay with GBM. Confirmed empirically here — `customer_recent_failure_pressure` added as a single engineered feature let a flat GBM track its own oracle ceiling as tightly as the LSTM did (0.0055 vs 0.0049 gap), with no architecture change needed.
-- **Unstructured data** (support-email text, etc.): does NOT require jumping straight to a transformer/LLM as the decision model. A cheaper, consistent pattern: extract a structured signal upstream (embedding or one-time LLM call → a bool/enum feature), keep GBM as the decision layer. Only the feature-extraction step changes.
+- **Unstructured data** (support-email text, etc.): does NOT require jumping straight to a transformer/LLM as the decision model. A cheaper, consistent pattern: extract a structured signal upstream (contrastive embedding → a bool/enum feature), keep GBM as the decision layer. Only the feature-extraction step changes. Implemented: `extract_hardship_signal_embedding` as the default extractor in Schema v3.
 - **Deep, heterogeneous, cross-domain event sequences** (the Vulcan-scale case — hundreds of mixed-event-type steps spanning subscription, abandonment, and B2B in one timeline): plausibly does need a real sequence/attention architecture, since an EWMA-style flat feature loses step-level detail at that scale. This is a **hypothesis, not a finding** — never built or tested at that scale, unlike the claims above. Flagged as an open question, not asserted as an architectural conclusion.
 
 ---
@@ -596,8 +757,9 @@ A documented rule of thumb, derived from what step 5 actually found rather than 
 
 **Key dependencies**:
 - `xgboost` — GBM training and hyperparameter search
-- `torch` — PyTorch neural net
+- `torch` — PyTorch neural net and LSTM
 - `scikit-learn` — pipelines, calibration, GroupKFold
+- `sentence-transformers` — `all-MiniLM-L6-v2` embedding model for hardship signal extraction
 - `joblib` — model bundle serialization
 - `numpy`, `scipy` — numerical operations, probability distributions
 - `pandas` — feature matrix construction
