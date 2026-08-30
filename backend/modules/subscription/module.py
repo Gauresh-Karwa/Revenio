@@ -17,7 +17,11 @@ from backend.core.contract import (
     StopReason,
 )
 from backend.data.subscription_generator import compute_pressure_from_customer_history
-from backend.ml.features import FEATURE_NAMES_WITH_HISTORY, build_feature_vector_with_history
+from backend.ml.features import (
+    FEATURE_NAMES_WITH_HISTORY_AND_TEXT,
+    build_feature_vector_with_history_and_text,
+)
+from backend.ml.text_signals import HardshipExtractor, extract_hardship_signal_embedding, hash_email_reference
 
 SOFT_DECLINE_CODES: dict[str, str] = {
     "51": "insufficient_funds",
@@ -54,18 +58,6 @@ DEFAULT_MODEL_PATH = Path(__file__).parent.parent.parent / "ml" / "models" / "su
 
 
 def _load_model_bundle(model_path: Path) -> dict | None:
-    """
-    Loads the offline-trained bundle (model_type + pipeline + feature
-    schema) if it exists. Returns None if it doesn't — the normal state
-    before train_subscription_model.py has ever been run — and must never
-    raise, since SubscriptionModule() is instantiated no-arg throughout the
-    orchestrator and test suite.
-
-    Also refuses a bundle whose feature schema doesn't match the module's
-    live schema: this is the concrete guard against the "model trained on
-    one feature set, module builds a different one, predictions are
-    silently wrong" failure mode.
-    """
     if not model_path.exists():
         return None
     try:
@@ -75,13 +67,13 @@ def _load_model_bundle(model_path: Path) -> dict | None:
     except Exception:
         return None
 
-    if bundle.get("feature_names") != FEATURE_NAMES_WITH_HISTORY:
+    if bundle.get("feature_names") != FEATURE_NAMES_WITH_HISTORY_AND_TEXT:
         warnings.warn(
             "Loaded model bundle's feature_names does not match the current "
-            "(enriched, with customer_recent_failure_pressure) schema — "
-            "refusing to use it. Re-run train_subscription_model.py to "
-            "retrain against the current feature set. Falling back to "
-            "rule-based confidence only.",
+            "(enriched, with customer_recent_failure_pressure and "
+            "hardship_signal_detected) schema — refusing to use it. Re-run "
+            "train_subscription_model.py to retrain against the current "
+            "feature set. Falling back to rule-based confidence only.",
             stacklevel=2,
         )
         return None
@@ -92,9 +84,23 @@ def _load_model_bundle(model_path: Path) -> dict | None:
 class SubscriptionModule:
     domain_type = "subscription"
 
-    def __init__(self, model_path: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        model_path: Path | str | None = None,
+        hardship_extractor: HardshipExtractor = extract_hardship_signal_embedding,
+    ) -> None:
+        """
+        hardship_extractor: THE swap point for the signal extractor.
+        Defaults to extract_hardship_signal_embedding — sentence-transformers
+        all-MiniLM-L6-v2, fully offline, no API key, catches paraphrases
+        keyword matching misses. Falls back to keyword matching automatically
+        if sentence-transformers is not installed. Pass any callable with the
+        same (email_text) -> dict signature to swap without touching anything
+        else in this class or features.py.
+        """
         path = Path(model_path) if model_path is not None else DEFAULT_MODEL_PATH
         self._model_bundle = _load_model_bundle(path)
+        self._hardship_extractor = hardship_extractor
 
     def check_stop(
         self, case: dict[str, Any], history: list[dict[str, Any]]
@@ -114,25 +120,24 @@ class SubscriptionModule:
         return StopDecision(should_stop=False)
 
     def _predict_recovery_probability(
-        self, case: dict[str, Any], code: str, customer_recent_failure_pressure: float
+        self,
+        case: dict[str, Any],
+        code: str,
+        customer_recent_failure_pressure: float,
+        hardship_signal_detected: bool,
     ) -> float | None:
-        """
-        Only ever called for known soft codes. Model-agnostic: whichever
-        model_type won at training time (GBM, MLP, or a future candidate),
-        this call is identical — the winning Pipeline owns its own
-        preprocessing, so this method never needs to know what's inside it.
-        """
         if self._model_bundle is None:
             return None
         pipeline = self._model_bundle["pipeline"]
         features = [
-            build_feature_vector_with_history(
+            build_feature_vector_with_history_and_text(
                 decline_code=code,
                 attempt_number=case.get("attempt_number", 1),
                 hour_of_day=case.get("hour_of_day", 12),
                 is_near_payday=case.get("is_near_payday", False),
                 amount=case.get("amount", 0.0),
                 customer_recent_failure_pressure=customer_recent_failure_pressure,
+                hardship_signal_detected=hardship_signal_detected,
             )
         ]
         return float(pipeline.predict_proba(features)[0][1])
@@ -142,14 +147,6 @@ class SubscriptionModule:
     ) -> Diagnosis:
         code = case.get("decline_code")
 
-        # Cross-case signal: this customer's OTHER, past cases' terminal
-        # outcomes, in chronological order, replayed through the exact same
-        # causal EWMA the generator uses (single shared implementation —
-        # see subscription_generator.compute_pressure_from_customer_history
-        # — so training and inference can never silently drift apart on
-        # this math). customer_history is None/empty for a customer's first
-        # case, or when the orchestrator has no customer_id for this case —
-        # both correctly fall back to pressure=0.0 (neutral), not a guess.
         past_case_outcomes = [
             event.get("status") == "RECOVERED"
             for event in (customer_history or [])
@@ -157,14 +154,22 @@ class SubscriptionModule:
         ]
         customer_recent_failure_pressure = compute_pressure_from_customer_history(past_case_outcomes)
 
+        email_text = case.get("email_text")
+        hardship_extraction = self._hardship_extractor(email_text)
+        hardship_signal_detected = hardship_extraction["hardship_signal_detected"]
+
         if code in SOFT_DECLINE_CODES:
             raw_signal = {"decline_code": code, "source": "iso8583_soft_lookup"}
             if self._model_bundle is not None:
-                # Audit visibility only (architecture doc 7.2 developer/audit
-                # view) — never branched on for behavior.
                 raw_signal["model_type"] = self._model_bundle["model_type"]
             raw_signal["customer_recent_failure_pressure"] = customer_recent_failure_pressure
             raw_signal["n_past_cases_considered"] = len(past_case_outcomes)
+            raw_signal["hardship_signal_detected"] = hardship_signal_detected
+            raw_signal["hardship_confidence_tier"] = hardship_extraction.get(
+                "hardship_confidence_tier", "high" if hardship_signal_detected else "none"
+            )
+            raw_signal["extracted_reason_code"] = hardship_extraction["extracted_reason_code"]
+            raw_signal["email_reference_hash"] = hash_email_reference(email_text)
 
             return Diagnosis(
                 root_cause=SOFT_DECLINE_CODES[code],
@@ -172,7 +177,7 @@ class SubscriptionModule:
                 confidence=0.95,
                 raw_signal=raw_signal,
                 predicted_recovery_probability=self._predict_recovery_probability(
-                    case, code, customer_recent_failure_pressure
+                    case, code, customer_recent_failure_pressure, hardship_signal_detected
                 ),
             )
 
@@ -202,6 +207,26 @@ class SubscriptionModule:
     def decide(
         self, case: dict[str, Any], diagnosis: Diagnosis, history: list[dict[str, Any]]
     ) -> Decision:
+        if diagnosis.raw_signal.get("hardship_signal_detected"):
+            tier = diagnosis.raw_signal.get("hardship_confidence_tier", "high")
+            if tier == "uncertain":
+                reasoning = (
+                    "Customer email could not be confidently classified by the "
+                    "extractor (contrastive score in uncertain band) — routed to "
+                    "human review rather than making a binary call on out-of-"
+                    "distribution text."
+                )
+            else:
+                reasoning = (
+                    "Customer disclosed financial hardship — routed to human "
+                    "review regardless of model confidence, per policy."
+                )
+            return Decision(
+                action_type=ActionType.ESCALATE,
+                reasoning=reasoning,
+                requires_human_review=True,
+            )
+
         if diagnosis.confidence < 0.5:
             return Decision(
                 action_type=ActionType.ESCALATE,
