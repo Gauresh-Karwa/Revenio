@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "model_type": "GBM",
   "feature_names": [
     "code_51",
@@ -12,21 +12,23 @@
     "is_night",
     "is_near_payday",
     "amount",
-    "customer_recent_failure_pressure"
+    "customer_recent_failure_pressure",
+    "hardship_signal_detected"
   ],
+  "hardship_extractor_name": "extract_hardship_signal_embedding",
   "metrics": {
     "GBM": {
-      "val_auc": 0.6774988720273795,
-      "val_brier": 0.21801183317749676
+      "val_auc": 0.6522037011940793,
+      "val_brier": 0.2119686710532855
     },
     "MLP": {
-      "val_auc": 0.6772210056013469,
-      "val_brier": 0.21745968880831207
+      "val_auc": 0.6375570312147084,
+      "val_brier": 0.2157137525268485
     }
   },
-  "winner_test_auc": 0.6788186904785254,
-  "winner_test_brier": 0.21229727135603566,
-  "n_train": 5603,
-  "n_val": 1235,
-  "n_test": 1230
+  "winner_test_auc": 0.7134433084018682,
+  "winner_test_brier": 0.20725927558041793,
+  "n_train": 5675,
+  "n_val": 1208,
+  "n_test": 1259
 }

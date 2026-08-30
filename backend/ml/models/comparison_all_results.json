@@ -1,0 +1,36 @@
+{
+  "oracle_auc": 0.7035,
+  "models": {
+    "GBM": {
+      "val_auc": 0.7403,
+      "test_auc": 0.7002,
+      "test_brier": 0.2161,
+      "gap_to_oracle": 0.0033
+    },
+    "MLP": {
+      "val_auc": 0.7261,
+      "test_auc": 0.692,
+      "test_brier": 0.2181,
+      "gap_to_oracle": 0.0115
+    },
+    "LSTM": {
+      "val_auc": 0.7454,
+      "test_auc": 0.6982,
+      "test_brier": 0.2173,
+      "gap_to_oracle": 0.0053
+    }
+  },
+  "data": {
+    "n_cases_total": 7952,
+    "n_train": 5560,
+    "n_val": 1175,
+    "n_test": 1217,
+    "flat_train_rows": 10542,
+    "flat_test_rows": 2348,
+    "sequence_train_examples": 10542,
+    "sequence_test_examples": 2348
+  },
+  "schema_version": 3,
+  "hardship_extractor": "extract_hardship_signal_embedding",
+  "note": "All three models trained on the same entity-level split. Flat models (GBM, MLP) use the last attempt's flat feature vector. LSTM uses the full padded sequence. Oracle uses true_recovery_probability()."
+}

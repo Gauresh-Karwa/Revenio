@@ -7,16 +7,17 @@ Run this manually (Gauresh runs training, not Claude).
 
 Produces: backend/ml/models/subscription_winner.joblib
 
-SCHEMA v2: now trains on the ENRICHED feature set
-(FEATURE_NAMES_WITH_HISTORY, 11 features including
-customer_recent_failure_pressure), adopted as canonical after
-backend/ml/compare_with_history.py showed a flat model given this feature
-tracks its own oracle ceiling at least as tightly as the LSTM did — see
-README.md for the full comparison. generate_subscription_dataset is called
-with include_customer_history=True specifically for this reason. Any bundle
-trained by the OLD (v1, 10-feature) version of this script will be
-correctly rejected at load time by SubscriptionModule's feature_names check
-— that's the schema guard working as designed, not a bug to work around.
+SCHEMA v3: trains on FEATURE_NAMES_WITH_HISTORY_AND_TEXT (12 features,
+adding hardship_signal_detected). Any bundle trained by an OLDER version of
+this script will be correctly rejected at load time by SubscriptionModule's
+feature_names check.
+
+SWAPPING THE EXTRACTOR:
+
+    from backend.ml.text_signals import extract_hardship_signal_llm
+    train(hardship_extractor=extract_hardship_signal_llm)
+
+Requires `pip install anthropic` and ANTHROPIC_API_KEY set.
 """
 
 from __future__ import annotations
@@ -38,25 +39,30 @@ from backend.data.subscription_generator import (
     CODE_BASE_RECOVERY_RATE,
     generate_subscription_dataset,
 )
-from backend.ml.features import FEATURE_NAMES_WITH_HISTORY, build_feature_vector_with_history
+from backend.ml.features import (
+    FEATURE_NAMES_WITH_HISTORY_AND_TEXT,
+    build_feature_vector_with_history_and_text,
+)
+from backend.ml.text_signals import HardshipExtractor, extract_hardship_signal_embedding
 
 MODEL_DIR = Path(__file__).parent / "models"
 MODEL_PATH = MODEL_DIR / "subscription_winner.joblib"
 
-BUNDLE_SCHEMA_VERSION = 2  # v2: enriched feature set, see module docstring
+BUNDLE_SCHEMA_VERSION = 3
 
 
-def _records_to_matrix(records) -> tuple[np.ndarray, np.ndarray]:
+def _records_to_matrix(records, extractor: HardshipExtractor) -> tuple[np.ndarray, np.ndarray]:
     soft_records = [r for r in records if r.decline_code in CODE_BASE_RECOVERY_RATE]
     X = np.array(
         [
-            build_feature_vector_with_history(
+            build_feature_vector_with_history_and_text(
                 decline_code=r.decline_code,
                 attempt_number=r.attempt_number,
                 hour_of_day=r.hour_of_day,
                 is_near_payday=r.is_near_payday,
                 amount=r.amount,
                 customer_recent_failure_pressure=r.customer_recent_failure_pressure,
+                hardship_signal_detected=extractor(r.email_text)["hardship_signal_detected"],
             )
             for r in soft_records
         ]
@@ -96,7 +102,7 @@ def _build_candidates() -> dict[str, Pipeline]:
                         hidden_layer_sizes=(32, 16),
                         activation="relu",
                         alpha=1e-3,
-                        max_iter=500,
+                        max_iter=1000,
                         random_state=42,
                     ),
                     method="sigmoid",
@@ -109,13 +115,15 @@ def _build_candidates() -> dict[str, Pipeline]:
     return {"GBM": gbm, "MLP": mlp}
 
 
-def train() -> dict:
-    records = generate_subscription_dataset(include_customer_history=True)  # v2: enriched
+def train(hardship_extractor: HardshipExtractor = extract_hardship_signal_embedding) -> dict:
+    records = generate_subscription_dataset(
+        include_customer_history=True, include_support_email_signal=True
+    )
     train_records, val_records, test_records = entity_level_split(records)
 
-    X_train, y_train = _records_to_matrix(train_records)
-    X_val, y_val = _records_to_matrix(val_records)
-    X_test, y_test = _records_to_matrix(test_records)
+    X_train, y_train = _records_to_matrix(train_records, hardship_extractor)
+    X_val, y_val = _records_to_matrix(val_records, hardship_extractor)
+    X_test, y_test = _records_to_matrix(test_records, hardship_extractor)
 
     candidates = _build_candidates()
     results: dict[str, dict] = {}
@@ -137,7 +145,8 @@ def train() -> dict:
         "schema_version": BUNDLE_SCHEMA_VERSION,
         "model_type": winner_name,
         "pipeline": winner_pipeline,
-        "feature_names": FEATURE_NAMES_WITH_HISTORY,
+        "feature_names": FEATURE_NAMES_WITH_HISTORY_AND_TEXT,
+        "hardship_extractor_name": hardship_extractor.__name__,
         "metrics": {
             name: {"val_auc": r["val_auc"], "val_brier": r["val_brier"]}
             for name, r in results.items()
@@ -162,6 +171,7 @@ def train() -> dict:
 if __name__ == "__main__":
     result = train()
     print(f"Winner: {result['model_type']}")
+    print(f"Extractor used: {result['hardship_extractor_name']}")
     print(f"Saved bundle to {MODEL_PATH}")
     print(f"Per-candidate val AUC: {result['metrics']}")
     print(f"Winner test AUC: {result['winner_test_auc']:.4f}")
