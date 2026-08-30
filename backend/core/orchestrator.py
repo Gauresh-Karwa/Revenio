@@ -114,3 +114,51 @@ class Orchestrator:
                 return self._event_store.derive_state(case_id)
 
         return self._event_store.derive_state(case_id)
+
+    def submit_human_review(
+        self, case_id: str, confirmed: bool, case: dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        Records a human's decision on a case sitting in PendingHumanReview,
+        and — if the module implements it — notifies the module so it can
+        act on the confirmation (e.g. SubscriptionModule growing its
+        hardship anchor bank; see that module's on_human_review_confirmed).
+
+        PRIVACY-PRESERVING DURABLE/EPHEMERAL SPLIT, stated explicitly:
+        the DURABLE event appended here carries only `confirmed` (bool) —
+        no raw case data, consistent with every other privacy rule in this
+        project (raw email text is never persisted). `case` itself IS
+        passed to the module's optional callback, but only ephemerally,
+        in-memory, for this one call — the review-queue UI that already
+        held this case's data (to show a human what they're reviewing,
+        architecture doc 7.3) is the source of that data, not something
+        reconstructed from the privacy-scrubbed audit log. The module's
+        gating logic (see on_human_review_confirmed) checks the DURABLE
+        hardship_confidence_tier field before ever touching case["email_text"],
+        so a confirmation on a case with no prior hardship flag can never
+        accidentally leak into anchor growth.
+
+        Orchestrator itself stays domain-agnostic here too: it does not
+        know what "growing an anchor bank" means, it just calls an
+        optional, duck-typed method if the module defines one.
+        """
+        events = self._event_store.get_events(case_id)
+        if not events:
+            raise ValueError(f"No case found for case_id '{case_id}'")
+
+        domain_type = events[0].domain_type
+        customer_id = case.get("customer_id")
+
+        self._event_store.append(
+            case_id, domain_type, "human_review", "HumanReviewDecision",
+            {"confirmed": confirmed}, customer_id=customer_id,
+        )
+
+        module = self._modules.get(domain_type)
+        callback = getattr(module, "on_human_review_confirmed", None)
+        if callback is not None:
+            diagnosis_events = [e for e in events if e.event_type == "Diagnosis"]
+            last_diagnosis_payload = diagnosis_events[-1].payload if diagnosis_events else {}
+            callback(case, confirmed, last_diagnosis_payload)
+
+        return self._event_store.derive_state(case_id)

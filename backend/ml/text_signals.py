@@ -105,7 +105,10 @@ _neutral_embeddings = None
 def _get_embedding_model():
     """
     Loads sentence-transformers model on first call, caches it globally.
-    Encodes both hardship and neutral anchor banks on load.
+    Encodes hardship/neutral anchor banks separately from model loading —
+    this matters for add_confirmed_hardship_anchor below: growing the
+    anchor bank only needs to invalidate the (cheap) embeddings cache, not
+    reload the (expensive) model itself.
     Raises ImportError clearly if sentence-transformers is not installed.
     """
     global _embedding_model, _hardship_embeddings, _neutral_embeddings
@@ -113,13 +116,42 @@ def _get_embedding_model():
         from sentence_transformers import SentenceTransformer
 
         _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+    if _hardship_embeddings is None:
         _hardship_embeddings = _embedding_model.encode(
             _HARDSHIP_ANCHORS, convert_to_tensor=True, show_progress_bar=False
         )
+    if _neutral_embeddings is None:
         _neutral_embeddings = _embedding_model.encode(
             _NEUTRAL_ANCHORS, convert_to_tensor=True, show_progress_bar=False
         )
     return _embedding_model, _hardship_embeddings, _neutral_embeddings
+
+
+def add_confirmed_hardship_anchor(sentence: str) -> None:
+    """
+    Grows the hardship anchor bank from a real, human-confirmed case — the
+    step-6 feedback loop: an `uncertain`-tier case, once a person confirms
+    it really was hardship, becomes a new anchor, so future similar
+    phrasing is caught at `high` confidence instead of `uncertain`.
+
+    Deliberately NOT called automatically anywhere in this file — it is
+    invoked by SubscriptionModule.on_human_review_confirmed, gated on the
+    case's DURABLE hardship_confidence_tier being "uncertain" (never on raw
+    text living in the event log). This function only ever receives
+    EPHEMERAL text passed in directly by the caller at confirmation time.
+
+    Only invalidates the (cheap) cached embeddings, not the (expensive)
+    loaded model.
+    """
+    global _hardship_embeddings
+    if sentence not in _HARDSHIP_ANCHORS:
+        _HARDSHIP_ANCHORS.append(sentence)
+        _hardship_embeddings = None
+
+
+def get_hardship_anchor_count() -> int:
+    """Audit/developer-view visibility into how much the anchor bank has grown."""
+    return len(_HARDSHIP_ANCHORS)
 
 
 def extract_hardship_signal_embedding(email_text: str | None) -> dict:

@@ -21,7 +21,12 @@ from backend.ml.features import (
     FEATURE_NAMES_WITH_HISTORY_AND_TEXT,
     build_feature_vector_with_history_and_text,
 )
-from backend.ml.text_signals import HardshipExtractor, extract_hardship_signal_embedding, hash_email_reference
+from backend.ml.text_signals import (
+    HardshipExtractor,
+    add_confirmed_hardship_anchor,
+    extract_hardship_signal_embedding,
+    hash_email_reference,
+)
 
 SOFT_DECLINE_CODES: dict[str, str] = {
     "51": "insufficient_funds",
@@ -88,6 +93,8 @@ class SubscriptionModule:
         self,
         model_path: Path | str | None = None,
         hardship_extractor: HardshipExtractor = extract_hardship_signal_embedding,
+        learning_core: Any = None,
+        anchor_growth_callback: Any = add_confirmed_hardship_anchor,
     ) -> None:
         """
         hardship_extractor: THE swap point for the signal extractor.
@@ -97,10 +104,53 @@ class SubscriptionModule:
         if sentence-transformers is not installed. Pass any callable with the
         same (email_text) -> dict signature to swap without touching anything
         else in this class or features.py.
+
+        learning_core: optional backend.core.learning_core.LearningCore.
+        When provided AND it has a policy registered for "subscription",
+        decide() asks it which retry-backoff arm to pull instead of the
+        fixed RETRY_BACKOFF_HOURS escalation schedule. None (the default)
+        preserves the exact original fixed-schedule behavior.
+
+        anchor_growth_callback: THE step-6 feedback-loop swap point — a
+        Callable[[str], None] invoked by on_human_review_confirmed when a
+        human confirms an `uncertain`-tier case really was hardship.
+        Defaults to text_signals.add_confirmed_hardship_anchor, which is
+        SPECIFIC to the default embedding extractor's anchor bank — if you
+        swap hardship_extractor to something else (keyword or LLM), pass
+        anchor_growth_callback=None (or your own compatible growth
+        function) too, since the embedding-specific default wouldn't apply.
+        This coupling is intentional and stated here rather than silently
+        assumed.
         """
         path = Path(model_path) if model_path is not None else DEFAULT_MODEL_PATH
         self._model_bundle = _load_model_bundle(path)
         self._hardship_extractor = hardship_extractor
+        self._learning_core = learning_core
+        self._anchor_growth_callback = anchor_growth_callback
+
+    def on_human_review_confirmed(
+        self, case: dict[str, Any], confirmed: bool, last_diagnosis_payload: dict[str, Any]
+    ) -> None:
+        """
+        THE step-6 feedback loop, concretely. Called by
+        Orchestrator.submit_human_review — NOT part of the required
+        DomainModule contract (contract.py's Protocol doesn't declare it;
+        this is an optional, duck-typed extension only SubscriptionModule
+        implements, since only this domain currently has an anchor bank to
+        grow).
+        """
+        if not confirmed or self._anchor_growth_callback is None:
+            return
+
+        raw_signal = last_diagnosis_payload.get("raw_signal", {})
+        if raw_signal.get("hardship_confidence_tier") != "uncertain":
+            return
+
+        email_text = case.get("email_text")
+        if email_text is None:
+            return
+
+        self._anchor_growth_callback(email_text)
 
     def check_stop(
         self, case: dict[str, Any], history: list[dict[str, Any]]
@@ -239,8 +289,19 @@ class SubscriptionModule:
 
         if diagnosis.is_recoverable:
             retry_count = sum(1 for h in history if h.get("_event_type") == "ExecutionResult")
-            backoff_index = min(retry_count, len(RETRY_BACKOFF_HOURS) - 1)
-            backoff_hours = RETRY_BACKOFF_HOURS[backoff_index]
+
+            action_params: dict[str, Any] = {}
+            if self._learning_core is not None and self._learning_core.has_policy(self.domain_type):
+                # Step 6 wiring: the bandit chooses which backoff arm to pull
+                # for THIS retry, instead of the fixed escalating schedule.
+                arm = self._learning_core.select_arm(self.domain_type)
+                backoff_hours = RETRY_BACKOFF_HOURS[arm]
+                action_params["bandit_arm"] = arm
+            else:
+                backoff_index = min(retry_count, len(RETRY_BACKOFF_HOURS) - 1)
+                backoff_hours = RETRY_BACKOFF_HOURS[backoff_index]
+
+            action_params["retry_in_hours"] = backoff_hours
 
             reasoning = f"Soft decline ({diagnosis.root_cause}), retry #{retry_count + 1}"
             if diagnosis.predicted_recovery_probability is not None:
@@ -255,7 +316,7 @@ class SubscriptionModule:
 
             return Decision(
                 action_type=ActionType.RETRY,
-                action_params={"retry_in_hours": backoff_hours},
+                action_params=action_params,
                 reasoning=reasoning,
                 requires_human_review=False,
             )

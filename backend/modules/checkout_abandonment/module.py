@@ -41,6 +41,15 @@ NUDGE_CHANNEL_ESCALATION = ["email", "sms", "in_app"]
 class CheckoutAbandonmentModule:
     domain_type = "checkout_abandonment"
 
+    def __init__(self, learning_core: Any = None) -> None:
+        """
+        learning_core: optional backend.core.learning_core.LearningCore.
+        When provided AND it has a policy registered for
+        "checkout_abandonment", decide() asks it which channel arm to pull
+        instead of the fixed email->sms->in_app escalation order.
+        """
+        self._learning_core = learning_core
+
     def check_stop(
         self, case: dict[str, Any], history: list[dict[str, Any]]
     ) -> StopDecision:
@@ -129,11 +138,21 @@ class CheckoutAbandonmentModule:
 
         if diagnosis.is_recoverable:
             nudge_count = sum(1 for h in history if h.get("_event_type") == "ExecutionResult")
-            channel_index = min(nudge_count, len(NUDGE_CHANNEL_ESCALATION) - 1)
-            channel = NUDGE_CHANNEL_ESCALATION[channel_index]
+
+            action_params: dict[str, Any] = {}
+            if self._learning_core is not None and self._learning_core.has_policy(self.domain_type):
+                arm = self._learning_core.select_arm(self.domain_type)
+                channel = NUDGE_CHANNEL_ESCALATION[arm]
+                action_params["bandit_arm"] = arm
+            else:
+                channel_index = min(nudge_count, len(NUDGE_CHANNEL_ESCALATION) - 1)
+                channel = NUDGE_CHANNEL_ESCALATION[channel_index]
+
+            action_params["channel"] = channel
+
             return Decision(
                 action_type=ActionType.SWITCH_CHANNEL,
-                action_params={"channel": channel},
+                action_params=action_params,
                 reasoning=f"Recoverable abandonment ({diagnosis.root_cause}), nudge #{nudge_count + 1} via {channel}",
                 requires_human_review=False,
             )
