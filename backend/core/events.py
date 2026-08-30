@@ -17,7 +17,27 @@ from __future__ import annotations
 import itertools
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Protocol
+
+
+class EventObserver(Protocol):
+    """
+    Observer pattern, per architecture doc 9.5's own description of the
+    intended mechanism ("outcomes are queued... a single dedicated consumer
+    applies them to the policy sequentially — one writer, no races") —
+    this implements that as a real notification mechanism rather than
+    leaving it as prose. An observer is notified synchronously, in append
+    order, after an event is durably appended (never before — an observer
+    must never see an event that didn't actually get recorded).
+
+    This EventStore is documented as the in-memory, non-production version
+    (see module docstring). A real queued/async dispatch is the same
+    production-swap follow-up already tracked, not a new gap introduced
+    by adding this protocol — synchronous notification is the correct,
+    honest behavior for what this store already is.
+    """
+
+    def on_event(self, event: "Event") -> None: ...
 
 
 @dataclass(frozen=True)
@@ -47,6 +67,17 @@ class EventStore:
     def __init__(self) -> None:
         self._events: list[Event] = []
         self._id_counter = itertools.count(1)
+        self._observers: list[EventObserver] = []
+
+    def subscribe(self, observer: EventObserver) -> None:
+        """
+        Registers an observer to be notified of every future append(), in
+        order. Does NOT replay past events — an observer that needs prior
+        state should be constructed with it, or the caller should replay
+        get_events()/get_customer_case_history() into it explicitly before
+        subscribing. This keeps subscribe() itself simple and side-effect-free.
+        """
+        self._observers.append(observer)
 
     def append(
         self,
@@ -68,6 +99,8 @@ class EventStore:
             customer_id=customer_id,
         )
         self._events.append(event)
+        for observer in self._observers:
+            observer.on_event(event)
         return event
 
     def get_events(self, case_id: str) -> list[Event]:
@@ -82,14 +115,6 @@ class EventStore:
         order is already causal order — no separate timestamp sort needed).
         exclude_case_id keeps the CURRENT case's own in-progress events out
         of its own "past history" — a case is never its own history.
-
-        This is the concrete capability that was missing before: get_events
-        only ever answered "what happened in THIS case" (the within-case
-        retry chain); this answers "what happened in this customer's OTHER
-        cases" (the cross-case signal customer_recent_failure_pressure
-        actually needs). Events with customer_id=None (appended before this
-        field existed, or from a domain that doesn't set it) are never
-        returned here — they can't be attributed to any customer.
         """
         return [
             e for e in self._events
