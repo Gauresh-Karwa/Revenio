@@ -230,3 +230,81 @@ def build_feature_matrix_with_history(
     groups = np.array([customer_to_int[cid] for cid in df["customer_id"]])
 
     return X, y, FEATURE_NAMES_WITH_HISTORY, groups
+
+
+FEATURE_NAMES_WITH_HISTORY_AND_TEXT: list[str] = FEATURE_NAMES_WITH_HISTORY + [
+    "hardship_signal_detected"
+]
+
+
+def build_feature_vector_with_history_and_text(
+    decline_code: str,
+    attempt_number: int,
+    hour_of_day: int,
+    is_near_payday: bool,
+    amount: float,
+    customer_recent_failure_pressure: float,
+    hardship_signal_detected: bool,
+    night_hours: frozenset[int] = frozenset(range(0, 6)),
+) -> list[float]:
+    return build_feature_vector_with_history(
+        decline_code=decline_code, attempt_number=attempt_number, hour_of_day=hour_of_day,
+        is_near_payday=is_near_payday, amount=amount,
+        customer_recent_failure_pressure=customer_recent_failure_pressure,
+        night_hours=night_hours,
+    ) + [1.0 if hardship_signal_detected else 0.0]
+
+
+def records_to_frame_with_history_and_text(records: list, extractor=None) -> "pd.DataFrame":
+    import pandas as pd
+    from backend.data.subscription_generator import CODE_BASE_RECOVERY_RATE
+    from backend.ml.text_signals import extract_hardship_signal
+
+    extractor = extractor or extract_hardship_signal
+
+    soft_records = [r for r in records if r.decline_code in CODE_BASE_RECOVERY_RATE]
+    return pd.DataFrame(
+        [
+            {
+                "case_id": r.case_id,
+                "customer_id": r.customer_id,
+                "decline_code": r.decline_code,
+                "amount": r.amount,
+                "attempt_number": r.attempt_number,
+                "hour_of_day": r.hour_of_day,
+                "is_near_payday": r.is_near_payday,
+                "recovered": int(r.recovered),
+                "customer_recent_failure_pressure": r.customer_recent_failure_pressure,
+                "hardship_signal_detected": extractor(r.email_text)["hardship_signal_detected"],
+            }
+            for r in soft_records
+        ]
+    )
+
+
+def build_feature_matrix_with_history_and_text(
+    df: "pd.DataFrame",
+) -> "tuple[np.ndarray, np.ndarray, list[str], np.ndarray]":
+    import numpy as np
+
+    X = np.array(
+        [
+            build_feature_vector_with_history_and_text(
+                decline_code=row["decline_code"],
+                attempt_number=int(row["attempt_number"]),
+                hour_of_day=int(row["hour_of_day"]),
+                is_near_payday=bool(row["is_near_payday"]),
+                amount=float(row["amount"]),
+                customer_recent_failure_pressure=float(row["customer_recent_failure_pressure"]),
+                hardship_signal_detected=bool(row["hardship_signal_detected"]),
+            )
+            for _, row in df.iterrows()
+        ]
+    )
+    y = df["recovered"].to_numpy().astype(int)
+
+    unique_customers = sorted(df["customer_id"].unique())
+    customer_to_int = {cid: i for i, cid in enumerate(unique_customers)}
+    groups = np.array([customer_to_int[cid] for cid in df["customer_id"]])
+
+    return X, y, FEATURE_NAMES_WITH_HISTORY_AND_TEXT, groups

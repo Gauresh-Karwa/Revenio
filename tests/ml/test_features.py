@@ -25,3 +25,23 @@ def test_feature_matrix_labels_are_binary():
     df = records_to_frame(records)
     _, y, _, _ = build_feature_matrix(df)
     assert set(y.tolist()).issubset({0, 1})
+
+
+def test_records_to_frame_with_history_and_text():
+    from backend.ml.features import (
+        FEATURE_NAMES_WITH_HISTORY_AND_TEXT,
+        build_feature_matrix_with_history_and_text,
+        records_to_frame_with_history_and_text,
+    )
+
+    records = generate_subscription_dataset(
+        n_customers=300, seed=4, include_customer_history=True, include_support_email_signal=True
+    )
+    df = records_to_frame_with_history_and_text(records)
+    X, y, feature_names, groups = build_feature_matrix_with_history_and_text(df)
+
+    assert feature_names == FEATURE_NAMES_WITH_HISTORY_AND_TEXT
+    assert len(feature_names) == 12
+    assert X.shape == (len(df), 12)
+    assert len(y) == len(df)
+    assert len(groups) == len(df)
