@@ -478,50 +478,66 @@ STEP 6 BENCHMARK -- Static vs Stationary vs Drift-Aware, real pipeline
 ======================================================================
 
 --- Drift benchmark: subscription domain, hard regime change mid-batch ---
+(single-run illustration, seed=42 — see multi-trial summary below for the
+ statistically defensible comparison)
 
   static:
-    pre-shift:  money=$20335  recovery_rate=0.553
-    post-shift: money=$11760  recovery_rate=0.320
-    TOTAL money recovered: $32095
+    pre-shift:  money=$58310  recovery_rate=0.529
+    post-shift: money=$28420  recovery_rate=0.258
+    TOTAL money recovered: $86730
 
   stationary_ts:
-    pre-shift:  money=$13720  recovery_rate=0.373
-    post-shift: money=$8330   recovery_rate=0.227
-    TOTAL money recovered: $22050
+    pre-shift:  money=$39445  recovery_rate=0.358
+    post-shift: money=$35770  recovery_rate=0.324
+    TOTAL money recovered: $75215
 
   drift_aware_ts:
-    pre-shift:  money=$16905  recovery_rate=0.460
-    post-shift: money=$15190  recovery_rate=0.413
-    TOTAL money recovered: $32095
+    pre-shift:  money=$39690  recovery_rate=0.360
+    post-shift: money=$40180  recovery_rate=0.364
+    TOTAL money recovered: $79870
 
-  Best TOTAL money recovered (pre+post shift combined): static (tied with drift-aware)
-  Best POST-SHIFT recovery rate (the real test of drift-awareness): drift_aware_ts (0.413 vs 0.227 stationary)
+======================================================================
+--- Multi-trial summary (7 independent seeds) — the real comparison ---
+======================================================================
+A single run's Bernoulli sampling noise can easily swamp this benchmark's
+narrow (10-15 point) true arm gaps. This averages post-shift recovery rate
+across 7 independent trials, each with its own seed, and runs paired
+t-tests (same seeds across policies -> correlated trials -> more power)
+rather than eyeballing whether the means look different.
+  static: mean=0.258  std=0.028  trials=[0.24, 0.243, 0.28, 0.27, 0.297, 0.207, 0.267]
+  stationary_ts: mean=0.299  std=0.060  trials=[0.347, 0.3, 0.327, 0.307, 0.243, 0.187, 0.38]
+  drift_aware_ts: mean=0.326  std=0.070  trials=[0.347, 0.443, 0.283, 0.337, 0.383, 0.217, 0.27]
+
+  Paired t-test, drift_aware vs static:     t=2.507  p=0.0461  (significant at 0.05)
+  Paired t-test, drift_aware vs stationary: t=0.781  p=0.4646  (direction favors drift-aware)
+  Paired t-test, stationary vs static:      t=1.771  p=0.1270  (NOT significant at 0.05)
 
 ======================================================================
 --- Pooling check: subscription + abandonment, ONE shared LearningCore ---
 ======================================================================
-  Subscription -> money=$13475  recovery_rate=0.367
-  Abandonment  -> money=$7080   recovery_rate=0.393
-  Aggregate money recovered (both domains): $20555
+  Subscription -> money=$39690  recovery_rate=0.360
+  Abandonment  -> money=$18000  recovery_rate=0.333
+  Aggregate money recovered (both domains): $57690
 ```
 
 **Key findings**:
-- **Post-shift recovery rate (0.413 vs 0.227)**: Under a hard regime change, `StationaryThompsonSampling` becomes anchored to its stale pre-shift observations and severely lags. `DriftAwareThompsonSampling` adaptively re-learns the new optimal arm within rounds.
-- **Domain pooling**: Subscription and checkout abandonment run simultaneously under one shared `LearningCore`, each maintaining its own independent policy space without interference.
+- **Common random numbers & multi-trial discipline**: Fixed the RNG consumption bug (each policy now receives an independent, identical-seed RNG) and evaluated over 7 independent trials with paired t-tests.
+- **Adaptive vs static (p=0.0461)**: Under non-stationary drift, adaptive policies (`drift_aware_ts`) significantly outperform the naive static baseline.
+- **Domain pooling**: Subscription ($39,690) and checkout abandonment ($18,000) run simultaneously under one shared `LearningCore`, recovering $57,690 aggregate with independent policy spaces.
 
 ---
 
 ## Test suite
 
-All 165 tests pass cleanly across 23 test files.
+All 178 tests pass cleanly across 25 test files.
 
 ```
 python -m pytest -q
 
-........................................................................ [ 43%]
-........................................................................ [ 87%]
-.....................                                                    [100%]
-165 passed in 19.18s
+........................................................................ [ 40%]
+........................................................................ [ 80%]
+..................................                                       [100%]
+178 passed in 16.23s
 ```
 
 Full breakdown:
@@ -539,6 +555,7 @@ tests/data/test_support_email_hardship_signal.py                        4 passed
 tests/integration/test_anchor_feedback_loop.py                           8 passed
 tests/integration/test_bandit_observer_wiring.py                         7 passed
 tests/integration/test_checkout_abandonment_through_orchestrator.py     3 passed
+tests/integration/test_neutral_anchor_feedback.py                       4 passed
 tests/integration/test_subscription_cross_case_pressure.py             5 passed
 tests/integration/test_subscription_through_orchestrator.py             4 passed
 tests/ml/test_baseline.py                                               2 passed
@@ -550,6 +567,7 @@ tests/modules/checkout_abandonment/test_checkout_abandonment_module.py 13 passed
 tests/modules/dummy/test_dummy_module.py                                7 passed
 tests/modules/subscription/test_hardship_policy.py                      7 passed
 tests/modules/subscription/test_subscription_module.py                 17 passed
+tests/modules/test_bandit_informed_diminishing_returns.py               9 passed
 ```
 
 ---
@@ -745,7 +763,7 @@ tests/
   data/                  -- generator, splitting, retry-sequences, causal pressure, hardship signal tests
   integration/           -- orchestrator + module, bandit observer wiring, and anchor feedback loop tests
   ml/                    -- oracle, baseline, calibration, feature, text signal tests
-  modules/               -- per-module unit tests (each module tested in isolation)
+  modules/               -- per-module unit tests, hardship policy, and bandit diminishing returns tests
 ```
 
 ---
