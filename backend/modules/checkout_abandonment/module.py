@@ -50,14 +50,18 @@ class CheckoutAbandonmentModule:
         """
         self._learning_core = learning_core
 
+    # Bandit-informed early exit, symmetric to SubscriptionModule's. Scaled
+    # down for this domain's much smaller MAX_NUDGES=3 ceiling.
+    DIMINISHING_RETURNS_MIN_PULLS_PER_ARM = 20
+    DIMINISHING_RETURNS_PROBABILITY_FLOOR = 0.10
+    DIMINISHING_RETURNS_MIN_CASE_RETRIES = 1
+
     def check_stop(
         self, case: dict[str, Any], history: list[dict[str, Any]]
     ) -> StopDecision:
-        # Enforcement point 1a of 2: checkout-starter filter.
         if not case.get("reached_checkout", False):
             return StopDecision(should_stop=True, stop_reason=StopReason.COST_THRESHOLD)
 
-        # Enforcement point 2a of 2: consent gate, before decide/execute ever run.
         if not case.get("opt_in", False):
             return StopDecision(should_stop=True, stop_reason=StopReason.OPT_OUT)
 
@@ -66,6 +70,20 @@ class CheckoutAbandonmentModule:
             return StopDecision(should_stop=True, stop_reason=StopReason.COST_THRESHOLD)
 
         nudge_count = sum(1 for h in history if h.get("_event_type") == "ExecutionResult")
+
+        if (
+            self._learning_core is not None
+            and self._learning_core.has_policy(self.domain_type)
+            and nudge_count >= self.DIMINISHING_RETURNS_MIN_CASE_RETRIES
+        ):
+            arms = self._learning_core.snapshot()[self.domain_type]["arms"]
+            if all(a["pull_count"] >= self.DIMINISHING_RETURNS_MIN_PULLS_PER_ARM for a in arms):
+                best_estimate = max(
+                    (a.get("mean_estimate", a.get("mean_reward")) or 0.0) for a in arms
+                )
+                if best_estimate < self.DIMINISHING_RETURNS_PROBABILITY_FLOOR:
+                    return StopDecision(should_stop=True, stop_reason=StopReason.DIMINISHING_RETURNS)
+
         if nudge_count >= MAX_NUDGES:
             return StopDecision(should_stop=True, stop_reason=StopReason.DIMINISHING_RETURNS)
 
