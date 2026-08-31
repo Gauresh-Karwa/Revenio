@@ -24,6 +24,7 @@ from backend.ml.features import (
 from backend.ml.text_signals import (
     HardshipExtractor,
     add_confirmed_hardship_anchor,
+    add_confirmed_neutral_anchor,
     extract_hardship_signal_embedding,
     hash_email_reference,
 )
@@ -95,53 +96,47 @@ class SubscriptionModule:
         hardship_extractor: HardshipExtractor = extract_hardship_signal_embedding,
         learning_core: Any = None,
         anchor_growth_callback: Any = add_confirmed_hardship_anchor,
+        neutral_anchor_growth_callback: Any = add_confirmed_neutral_anchor,
     ) -> None:
         """
-        hardship_extractor: THE swap point for the signal extractor.
-        Defaults to extract_hardship_signal_embedding — sentence-transformers
-        all-MiniLM-L6-v2, fully offline, no API key, catches paraphrases
-        keyword matching misses. Falls back to keyword matching automatically
-        if sentence-transformers is not installed. Pass any callable with the
-        same (email_text) -> dict signature to swap without touching anything
-        else in this class or features.py.
+        hardship_extractor: swap point for the signal extractor.
 
-        learning_core: optional backend.core.learning_core.LearningCore.
-        When provided AND it has a policy registered for "subscription",
-        decide() asks it which retry-backoff arm to pull instead of the
-        fixed RETRY_BACKOFF_HOURS escalation schedule. None (the default)
-        preserves the exact original fixed-schedule behavior.
+        learning_core: optional LearningCore. When provided AND it has a
+        policy for "subscription", decide() asks it which retry-backoff
+        arm to pull instead of the fixed escalation schedule. check_stop
+        also consults it for a bandit-informed DIMINISHING_RETURNS stop —
+        see check_stop's docstring.
 
-        anchor_growth_callback: THE step-6 feedback-loop swap point — a
-        Callable[[str], None] invoked by on_human_review_confirmed when a
-        human confirms an `uncertain`-tier case really was hardship.
-        Defaults to text_signals.add_confirmed_hardship_anchor, which is
-        SPECIFIC to the default embedding extractor's anchor bank — if you
-        swap hardship_extractor to something else (keyword or LLM), pass
-        anchor_growth_callback=None (or your own compatible growth
-        function) too, since the embedding-specific default wouldn't apply.
-        This coupling is intentional and stated here rather than silently
-        assumed.
+        anchor_growth_callback / neutral_anchor_growth_callback: the
+        step-6 feedback-loop swap points. anchor_growth_callback fires
+        when a human confirms an `uncertain`-tier case WAS hardship
+        (grows the hardship bank). neutral_anchor_growth_callback fires
+        when a human confirms an `uncertain`-tier case was NOT hardship
+        (grows the neutral bank) — this symmetric path previously did not
+        exist. Both default to the embedding extractor's own anchor banks
+        — if you swap hardship_extractor, pass both as None (or your own
+        compatible functions) too.
         """
         path = Path(model_path) if model_path is not None else DEFAULT_MODEL_PATH
         self._model_bundle = _load_model_bundle(path)
         self._hardship_extractor = hardship_extractor
         self._learning_core = learning_core
         self._anchor_growth_callback = anchor_growth_callback
+        self._neutral_anchor_growth_callback = neutral_anchor_growth_callback
 
     def on_human_review_confirmed(
         self, case: dict[str, Any], confirmed: bool, last_diagnosis_payload: dict[str, Any]
     ) -> None:
         """
         THE step-6 feedback loop, concretely. Called by
-        Orchestrator.submit_human_review — NOT part of the required
-        DomainModule contract (contract.py's Protocol doesn't declare it;
-        this is an optional, duck-typed extension only SubscriptionModule
-        implements, since only this domain currently has an anchor bank to
-        grow).
-        """
-        if not confirmed or self._anchor_growth_callback is None:
-            return
+        Orchestrator.submit_human_review.
 
+        Both directions of feedback are handled, symmetrically: confirmed
+        WAS hardship grows the hardship bank; confirmed WAS NOT hardship
+        grows the neutral bank. Only `uncertain`-tier cases feed either
+        bank — `high` was already confidently correct, `none` was never
+        flagged for hardship review in the first place.
+        """
         raw_signal = last_diagnosis_payload.get("raw_signal", {})
         if raw_signal.get("hardship_confidence_tier") != "uncertain":
             return
@@ -150,11 +145,37 @@ class SubscriptionModule:
         if email_text is None:
             return
 
-        self._anchor_growth_callback(email_text)
+        if confirmed:
+            if self._anchor_growth_callback is not None:
+                self._anchor_growth_callback(email_text)
+        else:
+            if self._neutral_anchor_growth_callback is not None:
+                self._neutral_anchor_growth_callback(email_text)
+
+    # Bandit-informed diminishing-returns thresholds. Only meaningful once
+    # a learning_core is wired AND it has genuinely learned something —
+    # both magnitudes below are estimated judgment calls, not sourced.
+    DIMINISHING_RETURNS_MIN_PULLS_PER_ARM = 20
+    DIMINISHING_RETURNS_PROBABILITY_FLOOR = 0.10
+    DIMINISHING_RETURNS_MIN_CASE_RETRIES = 2
 
     def check_stop(
         self, case: dict[str, Any], history: list[dict[str, Any]]
     ) -> StopDecision:
+        """
+        DIMINISHING_RETURNS is a real StopReason defined in contract.py but,
+        before this, never actually fired by any module — the only way to
+        know "further retries are unlikely to help" is a learned per-arm
+        success-rate estimate, which didn't exist before the learning
+        core. When a learning_core is wired and has accumulated enough
+        data (every arm pulled at least DIMINISHING_RETURNS_MIN_PULLS_PER_ARM
+        times) and even its best-estimated arm's recovery odds are below
+        DIMINISHING_RETURNS_PROBABILITY_FLOOR, this case stops early —
+        smarter than grinding to the blunt MAX_RETRY_ATTEMPTS ceiling
+        regardless of whether continuing is worth it. Without a
+        learning_core (or before it has enough data), this never fires —
+        behavior is identical to before.
+        """
         code = case.get("decline_code")
 
         if code in HARD_DECLINE_CODES:
@@ -164,6 +185,20 @@ class SubscriptionModule:
             return StopDecision(should_stop=True, stop_reason=StopReason.OPT_OUT)
 
         retry_count = sum(1 for h in history if h.get("_event_type") == "ExecutionResult")
+
+        if (
+            self._learning_core is not None
+            and self._learning_core.has_policy(self.domain_type)
+            and retry_count >= self.DIMINISHING_RETURNS_MIN_CASE_RETRIES
+        ):
+            arms = self._learning_core.snapshot()[self.domain_type]["arms"]
+            if all(a["pull_count"] >= self.DIMINISHING_RETURNS_MIN_PULLS_PER_ARM for a in arms):
+                best_estimate = max(
+                    (a.get("mean_estimate", a.get("mean_reward")) or 0.0) for a in arms
+                )
+                if best_estimate < self.DIMINISHING_RETURNS_PROBABILITY_FLOOR:
+                    return StopDecision(should_stop=True, stop_reason=StopReason.DIMINISHING_RETURNS)
+
         if retry_count >= MAX_RETRY_ATTEMPTS:
             return StopDecision(should_stop=True, stop_reason=StopReason.COMPLIANCE_LIMIT)
 

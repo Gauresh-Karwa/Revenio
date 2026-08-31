@@ -134,12 +134,6 @@ def add_confirmed_hardship_anchor(sentence: str) -> None:
     it really was hardship, becomes a new anchor, so future similar
     phrasing is caught at `high` confidence instead of `uncertain`.
 
-    Deliberately NOT called automatically anywhere in this file — it is
-    invoked by SubscriptionModule.on_human_review_confirmed, gated on the
-    case's DURABLE hardship_confidence_tier being "uncertain" (never on raw
-    text living in the event log). This function only ever receives
-    EPHEMERAL text passed in directly by the caller at confirmation time.
-
     Only invalidates the (cheap) cached embeddings, not the (expensive)
     loaded model.
     """
@@ -149,9 +143,30 @@ def add_confirmed_hardship_anchor(sentence: str) -> None:
         _hardship_embeddings = None
 
 
+def add_confirmed_neutral_anchor(sentence: str) -> None:
+    """
+    The symmetric counterpart to add_confirmed_hardship_anchor — fixes a
+    real asymmetry: without this, only false NEGATIVES (missed hardship)
+    ever taught the anchor bank anything; false POSITIVES (an `uncertain`
+    case a human confirms was NOT hardship — a near-miss that fooled the
+    embedding) had no feedback path at all. Growing the NEUTRAL bank from
+    these confirmations means similar text is less likely to land in
+    `uncertain` again, reducing unnecessary human-review load over time.
+    """
+    global _neutral_embeddings
+    if sentence not in _NEUTRAL_ANCHORS:
+        _NEUTRAL_ANCHORS.append(sentence)
+        _neutral_embeddings = None
+
+
 def get_hardship_anchor_count() -> int:
-    """Audit/developer-view visibility into how much the anchor bank has grown."""
+    """Audit/developer-view visibility into how much the hardship bank has grown."""
     return len(_HARDSHIP_ANCHORS)
+
+
+def get_neutral_anchor_count() -> int:
+    """Audit/developer-view visibility into how much the neutral bank has grown."""
+    return len(_NEUTRAL_ANCHORS)
 
 
 def extract_hardship_signal_embedding(email_text: str | None) -> dict:
