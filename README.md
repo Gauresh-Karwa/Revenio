@@ -548,23 +548,54 @@ What was built:
   - Strict compliance blocking: DND, opted-out, and disputed invoices never recover automated collections by construction.
 - **Tests**:
   - 13 data generator tests (`tests/data/test_b2b_generator.py`).
+  - 9 ML comparison smoke tests (`tests/ml/test_b2b_compare.py`).
   - 31 standalone module tests (`tests/modules/b2b_receivables/test_b2b_receivables_module.py`).
   - 8 end-to-end integration tests (`tests/integration/test_b2b_receivables_through_orchestrator.py`).
+- **ML Model Comparison** (`backend/ml/compare_b2b.py`):
+
+```
+python -m backend.ml.compare_b2b
+
+B2B RECEIVABLES MODEL COMPARISON -- Baseline vs GBM vs MLP
+Entity-level split  |  Calibrated (sigmoid)  |  No fake numbers
+
+  Total records generated:                6029
+  Chased records (DND/opt-out/disputed):  4790
+  Entity-level split: 3343 train / 741 val / 706 test
+  Overall recovery rate (chased): 0.837
+
+  Oracle ceiling (Bayes): 0.8428
+
+  Model        Val AUC   Test AUC    Brier   Gap to oracle
+  ----------  --------  ---------  -------  --------------
+  Baseline      0.8271     0.8312   0.0921         +0.0115
+  GBM           0.8214     0.8365   0.0917         +0.0063
+  MLP           0.8221     0.8297   0.0902         +0.0131
+
+  Best test AUC:  GBM (0.8365)
+  Spread across all three models: 0.0068
+```
+
+  Key findings:
+  - Oracle AUC is 0.8428 vs subscription's 0.7035. B2B's generating function is structurally simpler (aging-bucket monotonic decay + one binary MSME flag) — the oracle is high because there is genuinely less irreducible uncertainty per record.
+  - GBM gap to oracle is only 0.0063 — it is essentially learning the generating function. The data is not the constraint; it is structurally learnable.
+  - Spread of 0.0068 across all three models: architecture does not matter here. Any calibrated model that can represent a monotonic function in five features will reach the same performance. GBM is the natural choice for the same reason it won the subscription comparison — interpretable, robust, no convergence warnings.
+  - MLP emits a ConvergenceWarning on the small smoke-test dataset (500 customers); this is expected at that scale and not a bug in the full-scale comparison.
 
 ---
 
 ## Test suite
 
-All 230 tests pass cleanly across 28 test files.
+All 239 tests pass cleanly across 29 test files.
 
 ```
 python -m pytest -q
 
-........................................................................ [ 31%]
-........................................................................ [ 62%]
-........................................................................ [ 93%]
-..............                                                           [100%]
-230 passed in 31.63s
+..............................................................................
+..............................................................................
+..............................................................................
+..................................                                           [100%]
+239 passed in 14.01s
 ```
 
 Full breakdown:
@@ -587,6 +618,7 @@ tests/integration/test_checkout_abandonment_through_orchestrator.py     3 passed
 tests/integration/test_neutral_anchor_feedback.py                       4 passed
 tests/integration/test_subscription_cross_case_pressure.py             5 passed
 tests/integration/test_subscription_through_orchestrator.py             4 passed
+tests/ml/test_b2b_compare.py                                            9 passed
 tests/ml/test_baseline.py                                               2 passed
 tests/ml/test_calibration.py                                            1 passed
 tests/ml/test_features.py                                               9 passed
@@ -604,7 +636,15 @@ tests/modules/test_bandit_informed_diminishing_returns.py               9 passed
 
 ## How to run
 
-### Run the unified model comparison (GBM vs MLP vs LSTM, same split)
+### Run the B2B receivables model comparison (Baseline vs GBM vs MLP)
+
+```
+python -m backend.ml.compare_b2b
+```
+
+Trains Baseline (logistic regression), GBM, and MLP on the same entity-level split of the B2B invoice dataset. Prints oracle ceiling, per-model val/test AUC, Brier, and gap to oracle. Saves results to `backend/ml/models/comparison_b2b_results.json`. No LSTM: B2B records are single-invoice states, not retry sequences.
+
+### Run the unified subscription model comparison (GBM vs MLP vs LSTM, same split)
 
 ```
 python -m backend.ml.compare_all

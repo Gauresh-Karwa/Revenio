@@ -1,0 +1,39 @@
+{
+  "oracle_auc": 0.8428,
+  "models": {
+    "Baseline": {
+      "val_auc": 0.8271,
+      "test_auc": 0.8312,
+      "test_brier": 0.0921,
+      "gap_to_oracle": 0.0115
+    },
+    "GBM": {
+      "val_auc": 0.8214,
+      "test_auc": 0.8365,
+      "test_brier": 0.0917,
+      "gap_to_oracle": 0.0063
+    },
+    "MLP": {
+      "val_auc": 0.8221,
+      "test_auc": 0.8297,
+      "test_brier": 0.0902,
+      "gap_to_oracle": 0.0131
+    }
+  },
+  "data": {
+    "n_records_total": 6029,
+    "n_chased": 4790,
+    "n_train": 3343,
+    "n_val": 741,
+    "n_test": 706,
+    "overall_recovery_rate": 0.837
+  },
+  "feature_names": [
+    "days_overdue",
+    "is_msme_registered",
+    "customer_recent_payment_pressure",
+    "invoice_amount",
+    "has_written_agreement"
+  ],
+  "note": "Entity-level split on customer_id. DND/opt-out/disputed records excluded (recovered=False by construction, zero predictive signal). No sequence model: B2B records are single-invoice states, not retry chains. customer_recent_payment_pressure=0.0 for all (default dataset)."
+}
