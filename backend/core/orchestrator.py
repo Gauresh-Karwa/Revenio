@@ -4,7 +4,7 @@ from dataclasses import asdict
 from enum import Enum
 from typing import Any
 
-from backend.core.contract import DomainModule
+from backend.core.contract import DomainModule, Outcome, OutcomeStatus
 from backend.core.events import EventStore
 
 
@@ -162,3 +162,60 @@ class Orchestrator:
             callback(case, confirmed, last_diagnosis_payload)
 
         return self._event_store.derive_state(case_id)
+
+    def check_promise_due(self, case_id: str, case: dict[str, Any]) -> dict[str, Any]:
+        """
+        Architecture doc section 3.6: fires when a PROMISED case reaches
+        its promised date. Before this method existed, on_promise_due was
+        defined in the shared contract but never actually called by
+        anything — the same class of gap DIMINISHING_RETURNS had before it
+        was wired into check_stop. Without this, B2B's promise-to-pay
+        tracking (the docx's own canonical example of what triggers
+        DIMINISHING_RETURNS) could never actually happen.
+
+        This is NOT polled internally — a real system's scheduler (or, in
+        this synthetic setup, whoever is driving the simulation) calls this
+        when a specific case's promised_date has arrived, passing the case
+        dict fresh (same "caller supplies current case state" pattern as
+        process_case). Domains that never produce a PROMISED status default
+        on_promise_due to kept=True and are unaffected either way, per
+        contract.py's own documented default.
+
+        kept=True -> the case is marked RECOVERED (the promise was honored,
+        payment materialized). kept=False -> per docx 3.6 exactly, "the
+        case re-enters the loop at check_stop... not silently dropped": a
+        durable PromiseOutcome(kept=False) event is appended FIRST, so the
+        domain module's check_stop (called via the process_case re-entry
+        below) can see it in this case's own history and act on it — e.g.
+        B2BReceivablesModule's broken-promise-triggered DIMINISHING_RETURNS.
+        """
+        events = self._event_store.get_events(case_id)
+        if not events:
+            raise ValueError(f"No case found for case_id '{case_id}'")
+
+        domain_type = events[0].domain_type
+        module = self._modules[domain_type]
+        customer_id = case.get("customer_id")
+
+        promise_outcome = module.on_promise_due(case)
+        self._event_store.append(
+            case_id, domain_type, "on_promise_due", "PromiseOutcome",
+            {"kept": promise_outcome.kept}, customer_id=customer_id,
+        )
+
+        if promise_outcome.kept:
+            outcome = Outcome(
+                status=OutcomeStatus.RECOVERED,
+                amount_recovered=case.get("invoice_amount", case.get("amount", 0.0)),
+            )
+            self._event_store.append(
+                case_id, domain_type, "track_outcome", "Outcome", _to_payload(outcome),
+                customer_id=customer_id,
+            )
+            return self._event_store.derive_state(case_id)
+
+        # Broken promise: re-enter the loop at check_stop, per docx 3.6.
+        # process_case replays this case's full history (now including the
+        # PromiseOutcome(kept=False) event just appended above) through
+        # check_stop before doing anything else.
+        return self.process_case(case_id, domain_type, case)

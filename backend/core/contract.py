@@ -82,6 +82,15 @@ class ExecutionResult:
 class Outcome:
     status: OutcomeStatus
     amount_recovered: float = 0.0
+    # NEW, additive, defaults to empty dict: a durable place for a domain to
+    # record outcome-specific detail that later stages need to look back up
+    # from the event log — e.g. B2B's PROMISED outcomes need to remember
+    # promised_date so on_promise_due can check it later. Existing
+    # subscription/checkout-abandonment Outcome() calls never set this and
+    # are completely unaffected (empty dict, same as today's implicit
+    # behavior). This is what raw_signal already does for Diagnosis;
+    # Outcome never had an equivalent place until now.
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
