@@ -586,7 +586,7 @@ Entity-level split  |  Calibrated (sigmoid)  |  No fake numbers
 
 ## Test suite
 
-All 239 tests pass cleanly across 29 test files.
+All 248 tests pass cleanly across 30 test files.
 
 ```
 python -m pytest -q
@@ -594,8 +594,8 @@ python -m pytest -q
 ..............................................................................
 ..............................................................................
 ..............................................................................
-..................................                                           [100%]
-239 passed in 14.01s
+...........................................                                  [100%]
+248 passed in 14.50s
 ```
 
 Full breakdown:
@@ -618,6 +618,7 @@ tests/integration/test_checkout_abandonment_through_orchestrator.py     3 passed
 tests/integration/test_neutral_anchor_feedback.py                       4 passed
 tests/integration/test_subscription_cross_case_pressure.py             5 passed
 tests/integration/test_subscription_through_orchestrator.py             4 passed
+tests/integration/test_three_domain_learning_core_pooling.py             9 passed
 tests/ml/test_b2b_compare.py                                            9 passed
 tests/ml/test_baseline.py                                               2 passed
 tests/ml/test_calibration.py                                            1 passed
