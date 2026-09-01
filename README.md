@@ -542,7 +542,12 @@ What was built:
 - **Contract & Orchestrator Integration**:
   - `Outcome.details` field added for persistent outcome metadata (such as `promised_date`).
   - `Orchestrator.check_promise_due(case_id, case)` handles promise resolution or loop re-entry on broken promises.
+- **Grounded Synthetic Data Generator** (`backend/data/b2b_generator.py`):
+  - Calibrated against multi-source AR-aging benchmarks (NACM/CCAA, Crestmont, Eagle Rock CFO): >95% current (0-30d), ~85-90% (31-60d), ~70-80% (61-90d), ~50-60% (91-120d), ~20-30% (>120d).
+  - Section 43B(h) tax incentive boost (x1.12) and causal cross-invoice payment relationship pressure (reusing shared `update_causal_pressure`).
+  - Strict compliance blocking: DND, opted-out, and disputed invoices never recover automated collections by construction.
 - **Tests**:
+  - 13 data generator tests (`tests/data/test_b2b_generator.py`).
   - 31 standalone module tests (`tests/modules/b2b_receivables/test_b2b_receivables_module.py`).
   - 8 end-to-end integration tests (`tests/integration/test_b2b_receivables_through_orchestrator.py`).
 
@@ -550,16 +555,16 @@ What was built:
 
 ## Test suite
 
-All 217 tests pass cleanly across 27 test files.
+All 230 tests pass cleanly across 28 test files.
 
 ```
 python -m pytest -q
 
-........................................................................ [ 33%]
-........................................................................ [ 66%]
-........................................................................ [ 99%]
-.                                                                        [100%]
-217 passed in 27.95s
+........................................................................ [ 31%]
+........................................................................ [ 62%]
+........................................................................ [ 93%]
+..............                                                           [100%]
+230 passed in 31.63s
 ```
 
 Full breakdown:
@@ -569,6 +574,7 @@ tests/core/test_customer_case_history.py                                5 passed
 tests/core/test_events.py                                               5 passed
 tests/core/test_learning_core.py                                       21 passed
 tests/core/test_orchestrator.py                                         6 passed
+tests/data/test_b2b_generator.py                                       13 passed
 tests/data/test_causal_pressure_parity.py                               4 passed
 tests/data/test_checkout_abandonment_generator.py                       6 passed
 tests/data/test_subscription_generator.py                               7 passed
@@ -751,6 +757,7 @@ backend/
   data/
     subscription_generator.py      -- grounded synthetic subscription records & retry sequences
     checkout_abandonment_generator.py -- grounded synthetic abandonment records
+    b2b_generator.py               -- grounded synthetic B2B overdue invoice records (AR aging curve)
     splitting.py         -- entity-level train/val/test splitting
   ml/
     features.py          -- canonical flat & enriched feature construction (one source of truth)
