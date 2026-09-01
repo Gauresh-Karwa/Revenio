@@ -527,17 +527,39 @@ rather than eyeballing whether the means look different.
 
 ---
 
+### Step 7 — B2B Receivables Module [DONE]
+
+Third core domain, addressing overdue invoice recovery, strict statutory compliance, and promise-to-pay lifecycles.
+
+What was built:
+- **Module** (`backend/modules/b2b_receivables/module.py`):
+  - **Section 43B(h) / MSMED Act Section 15**: Tracks 45-day (with written agreement) vs. 15-day (without agreement) statutory payment deadlines for registered MSMEs.
+  - **DND / NCPR Consent Enforcement**: Double-enforced at `check_stop` and `execute` (fails closed on DND/opt-out signals).
+  - **Disputed Invoice Protection**: Instantly halts automated outreach on disputed invoices (`StopReason.COST_THRESHOLD`) for legal/human handling.
+  - **Channel Escalation & Hinglish Voice Recovery**: Escalates across `email -> sms -> voice` (default `hi-IN` locale, configurable per customer).
+  - **Human Review Gate**: Escalates to human review when reaching the voice channel tier or upon incomplete invoice data.
+  - **Promise-to-Pay Lifecycle**: Full implementation of `on_promise_due` and `check_promise_due` in orchestrator. Repeated broken promises (`MAX_BROKEN_PROMISES = 2`) trigger `StopReason.DIMINISHING_RETURNS`.
+- **Contract & Orchestrator Integration**:
+  - `Outcome.details` field added for persistent outcome metadata (such as `promised_date`).
+  - `Orchestrator.check_promise_due(case_id, case)` handles promise resolution or loop re-entry on broken promises.
+- **Tests**:
+  - 31 standalone module tests (`tests/modules/b2b_receivables/test_b2b_receivables_module.py`).
+  - 8 end-to-end integration tests (`tests/integration/test_b2b_receivables_through_orchestrator.py`).
+
+---
+
 ## Test suite
 
-All 178 tests pass cleanly across 25 test files.
+All 217 tests pass cleanly across 27 test files.
 
 ```
 python -m pytest -q
 
-........................................................................ [ 40%]
-........................................................................ [ 80%]
-..................................                                       [100%]
-178 passed in 16.23s
+........................................................................ [ 33%]
+........................................................................ [ 66%]
+........................................................................ [ 99%]
+.                                                                        [100%]
+217 passed in 27.95s
 ```
 
 Full breakdown:
@@ -553,6 +575,7 @@ tests/data/test_subscription_generator.py                               7 passed
 tests/data/test_subscription_retry_sequences.py                        11 passed
 tests/data/test_support_email_hardship_signal.py                        4 passed
 tests/integration/test_anchor_feedback_loop.py                           8 passed
+tests/integration/test_b2b_receivables_through_orchestrator.py           8 passed
 tests/integration/test_bandit_observer_wiring.py                         7 passed
 tests/integration/test_checkout_abandonment_through_orchestrator.py     3 passed
 tests/integration/test_neutral_anchor_feedback.py                       4 passed
@@ -563,6 +586,7 @@ tests/ml/test_calibration.py                                            1 passed
 tests/ml/test_features.py                                               9 passed
 tests/ml/test_oracle.py                                                 2 passed
 tests/ml/test_text_signals.py                                          14 passed
+tests/modules/b2b_receivables/test_b2b_receivables_module.py            31 passed
 tests/modules/checkout_abandonment/test_checkout_abandonment_module.py 13 passed
 tests/modules/dummy/test_dummy_module.py                                7 passed
 tests/modules/subscription/test_hardship_policy.py                      7 passed
@@ -757,22 +781,20 @@ backend/
       module.py          -- subscription recovery (cross-case memory, hardship signal, bandit retry backoff)
     checkout_abandonment/
       module.py          -- checkout session recovery (bandit channel selection)
+    b2b_receivables/
+      module.py          -- B2B overdue receivables (MSME Section 43B(h), DND checks, promise tracking, voice)
 
 tests/
   core/                  -- orchestrator, event-sourcing, learning core, and customer case history tests
   data/                  -- generator, splitting, retry-sequences, causal pressure, hardship signal tests
   integration/           -- orchestrator + module, bandit observer wiring, and anchor feedback loop tests
   ml/                    -- oracle, baseline, calibration, feature, text signal tests
-  modules/               -- per-module unit tests, hardship policy, and bandit diminishing returns tests
+  modules/               -- per-module unit tests (subscription, abandonment, b2b), hardship, diminishing returns
 ```
 
 ---
 
 ## What is left to build
-
-### Step 7 — B2B receivables module [NOT STARTED]
-
-Third domain. The most compliance-heavy: DND registry checks, Section 43B(h) MSME payment timeline rules. Also the domain that exercises `on_promise_due` and the human-review queue path most fully.
 
 ### Step 8 — Mandate retry sequencer [STRETCH]
 
