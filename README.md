@@ -582,11 +582,46 @@ Entity-level split  |  Calibrated (sigmoid)  |  No fake numbers
   - Spread of 0.0068 across all three models: architecture does not matter here. Any calibrated model that can represent a monotonic function in five features will reach the same performance. GBM is the natural choice for the same reason it won the subscription comparison — interpretable, robust, no convergence warnings.
   - MLP emits a ConvergenceWarning on the small smoke-test dataset (500 customers); this is expected at that scale and not a bug in the full-scale comparison.
 
+- **Inbound Reply & Intent Resolution Protocol**:
+  - **Promise to Pay**: When a debtor commits to a date (*"I will pay by March 15th"*), the case sets `active_promise_date`. The engine pauses automated contact via `ActionType.WAIT`. When due (`check_promise_due`), kept promises transition to `OutcomeStatus.RECOVERED`, while broken promises re-enter the loop or halt after 2 failures (`StopReason.DIMINISHING_RETURNS`).
+  - **Disputed Invoice**: When a debtor raises a billing/goods dispute (*"Defective delivery / wrong price"*), setting `is_disputed = True` triggers `StopReason.COST_THRESHOLD` to halt automated collections immediately.
+  - **DND / Opt-Out**: Explicit STOP requests or DND flags halt all channels via `StopReason.OPT_OUT`.
+  - **Hardship Disclosure**: Text replies with financial distress trigger NLP hardship classification and escalate to `requires_human_review = True`.
+- **Hinglish Voice Recovery Architecture**:
+  - **Channel Escalation**: `["email", "sms", "voice"]` provides low-touch to high-touch progression.
+  - **Hinglish Synthesis**: Voice action payloads specify `locale: "hi-IN"` (Hindi/Hinglish code-mixing) for localized voice bot synthesis (*"Namaste Sharma ji, ABC Corp se call hai regarding invoice #1042..."*).
+  - **Human Review Gate**: Escalation to voice calls on overdue invoices automatically sets `requires_human_review = True` for high-value debt protection.
+  - **Step 9 Interactive Voice Simulator**: The frontend dashboard will include an in-browser voice simulator allowing live Hinglish spoken audio input/output, real-time intent extraction, and state transitions during demo judging.
+
+---
+
+### Step 8 — Mandate Retry Sequencer (UPI Autopay & NACH) [DONE]
+
+Fourth domain (stretch), expanding recovery to recurring UPI and bank debit mandates under Indian network rules.
+
+What was built:
+- **Module** (`backend/modules/mandate_retry/module.py`):
+  - **UPI Autopay Rail (NPCI 2026 Rules)**:
+    - **RBI AFA Exemption Threshold**: Recurring debits > ₹15,000 deterministically switch to `push_notification` (`ActionType.SWITCH_CHANNEL`) for manual UPI-PIN re-authentication instead of blind automated retry. Second compliance gate in `execute()` blocks unlawful auto-retries > ₹15k.
+    - **NPCI Execution Window & Retry Ceiling**: Strictly bounds retries to 1 main attempt + 3 retries (4 total attempts, `StopReason.COMPLIANCE_LIMIT`).
+    - **Taxonomy**: Mapped soft failures (`U01` insufficient funds, `U02` issuer bank unavailable, `U03` technical decline, `U04` bank timeout) vs stop codes (`U_REVOKED`, `U_PAUSED`, `U_EXPIRED` -> `StopReason.OPT_OUT`).
+  - **NACH Rail (RBI ECS(Debit) Guidelines)**:
+    - **Data Correction Gate**: Return reason codes `1`, `2`, `3` require underlying account data correction before re-presentation (`requires_human_review = True`).
+    - **No Mandate Stop**: Return code `8` ("Mandate not received") halts immediately (`StopReason.OPT_OUT`).
+    - **Ceiling**: Strictly bounds re-presentments to 3 runs (`MAX_NACH_PRESENTATIONS = 3`, `StopReason.COMPLIANCE_LIMIT`).
+  - **LearningCore Bandit Wiring**:
+    - Optional 3-arm Thompson sampling bandit over `UPI_RETRY_BACKOFF_HOURS = [24, 72, 168]`.
+    - Bandits intentionally scoped to UPI Autopay where multi-backoff alternatives exist; NACH operates on fixed 24h cadence.
+    - Works with zero changes to `BanditUpdateObserver`.
+- **Tests**:
+  - 34 standalone unit tests (`tests/modules/mandate_retry/test_mandate_retry_module.py`).
+  - 9 end-to-end integration tests (`tests/integration/test_mandate_retry_through_orchestrator.py`).
+
 ---
 
 ## Test suite
 
-All 248 tests pass cleanly across 30 test files.
+All 291 tests pass cleanly across 32 test files.
 
 ```
 python -m pytest -q
@@ -594,8 +629,8 @@ python -m pytest -q
 ..............................................................................
 ..............................................................................
 ..............................................................................
-...........................................                                  [100%]
-248 passed in 14.50s
+...................................................................          [100%]
+291 passed in 21.15s
 ```
 
 Full breakdown:
@@ -615,6 +650,7 @@ tests/integration/test_anchor_feedback_loop.py                           8 passe
 tests/integration/test_b2b_receivables_through_orchestrator.py           8 passed
 tests/integration/test_bandit_observer_wiring.py                         7 passed
 tests/integration/test_checkout_abandonment_through_orchestrator.py     3 passed
+tests/integration/test_mandate_retry_through_orchestrator.py             9 passed
 tests/integration/test_neutral_anchor_feedback.py                       4 passed
 tests/integration/test_subscription_cross_case_pressure.py             5 passed
 tests/integration/test_subscription_through_orchestrator.py             4 passed
@@ -628,6 +664,7 @@ tests/ml/test_text_signals.py                                          14 passed
 tests/modules/b2b_receivables/test_b2b_receivables_module.py            31 passed
 tests/modules/checkout_abandonment/test_checkout_abandonment_module.py 13 passed
 tests/modules/dummy/test_dummy_module.py                                7 passed
+tests/modules/mandate_retry/test_mandate_retry_module.py                34 passed
 tests/modules/subscription/test_hardship_policy.py                      7 passed
 tests/modules/subscription/test_subscription_module.py                 17 passed
 tests/modules/test_bandit_informed_diminishing_returns.py               9 passed
