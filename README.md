@@ -613,9 +613,22 @@ What was built:
     - Optional 3-arm Thompson sampling bandit over `UPI_RETRY_BACKOFF_HOURS = [24, 72, 168]`.
     - Bandits intentionally scoped to UPI Autopay where multi-backoff alternatives exist; NACH operates on fixed 24h cadence.
     - Works with zero changes to `BanditUpdateObserver`.
+- **Grounded Synthetic Data Generator** (`backend/data/mandate_retry_generator.py`):
+  - Calibrated against NPCI monthly dashboards and RBI Payment System Indicator reports on e-NACH/ECS items.
+  - Realistic rail split (65% UPI Autopay, 35% NACH) and failure taxonomies (U01 balance vs U02-U04 system transients; NACH return codes 1-3 vs 8 vs insufficient funds).
+  - True recovery probability oracle with arm sensitivity: U01 peaks at 72h backoff (payday proximity), U02-U04 transients peak at 24h backoff (quick system resolution).
+  - Strict compliance blocking: stop codes, NACH correction-required codes, and opted-out mandates never recover by construction.
+- **Four-Domain LearningCore Pooling** (`tests/integration/test_three_domain_learning_core_pooling.py`):
+  - Wires all four domains (`subscription` [4 arms], `checkout_abandonment` [3 arms], `b2b_receivables` [3 arms], `mandate_retry` [3 arms]) into ONE shared `LearningCore` and `BanditUpdateObserver`.
+  - Proves total policy isolation across interleaved cases with zero arm pull bleed.
+- **Bandit Simulation Extension** (`backend/ml/bandit_simulation.py`):
+  - Added `mandate_retry` to `run_pooling_check()` alongside subscription and checkout abandonment.
+  - Recovers $448,200 on mandate retry alone, achieving $505,890 aggregate across pooled domains with one shared learning core.
 - **Tests**:
+  - 19 data generator tests (`tests/data/test_mandate_retry_generator.py`).
   - 34 standalone unit tests (`tests/modules/mandate_retry/test_mandate_retry_module.py`).
   - 9 end-to-end integration tests (`tests/integration/test_mandate_retry_through_orchestrator.py`).
+  - 4 four-domain pooling integration tests (`tests/integration/test_three_domain_learning_core_pooling.py`).
 
 ---
 
@@ -885,12 +898,32 @@ tests/
 
 Reuses the subscription module's shape on a different payment rail (UPI/NACH). Cheap to add once the subscription module is proven.
 
-### Step 9 — Frontend [NOT FINALIZED]
+### Step 9 — Interactive merchant workbench [IMPLEMENTED]
 
-Three views:
-- Merchant view: live transaction feed, money recovered, recovery rate, active recoveries
-- Developer/audit view: full per-case trace (diagnose → decide → execute → track), exportable audit log
-- Human review queue: cases where `requires_human_review` is true, with approve/override controls
+The Vite frontend is a payment-operations console rather than a JSON viewer.
+It submits user-entered cases to the real domain modules and renders the
+resulting append-only event history in plain language.
+
+- Merchant overview: recovered revenue, recovery rate, active cases, review queue and transaction feed
+- Payment workbench: named customer, amount, module-specific reason signals, consent and response controls
+- Portfolio load test: run 10, 50 or 100 fresh mixed transactions and observe WebSocket-driven case updates
+- Case record: policy decision, execution receipt, customer effect and outcome rendered as structured fields
+- Human review: approves or stops a gated action; B2B approval releases the Hinglish voice channel
+- Razorpay recovery-link action: creates a genuine Razorpay SDK payment link only after an explicit operator click and valid credentials
+
+### Delivery modes
+
+The default `sandbox` adapter never contacts an email address or phone number.
+`live` is an opt-in integration boundary, not a fake delivery confirmation:
+
+- Email uses Resend (`RESEND_API_KEY`, `REVENIO_EMAIL_FROM`).
+- SMS and voice use Twilio (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`).
+- Live delivery also requires `REVENIO_CHANNEL_MODE=live` and
+  `REVENIO_LIVE_DELIVERY_ACK=I_HAVE_CONSENT`. Missing configuration or a
+  recipient yields an auditable `delivery_blocked` event; it does not claim a
+  message or call occurred.
+- Razorpay payment links require `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and
+  `RAZORPAY_WEBHOOK_SECRET`. Start with Razorpay test keys; API secrets remain server-side.
 
 ---
 
@@ -955,3 +988,25 @@ A documented rule of thumb, derived from what step 5 actually found rather than 
 - `pytest` — test suite
 
 **Running on Windows**: All paths use forward slashes internally. The project root must be on `sys.path` for `-m` module invocations to work (`python -m backend.ml.compare` from the project root).
+
+---
+
+## Run the merchant workbench
+
+Start the API from the repository root:
+
+```powershell
+$env:REVENIO_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/revenio"
+$env:REVENIO_REDIS_URL="rediss://..."
+python -m uvicorn backend.api.app:app --reload --port 8000
+```
+
+Then, in a second terminal:
+
+```powershell
+cd frontend
+npm run dev
+```
+
+For live, consented delivery add provider variables before starting the API.
+Never put provider secrets in the frontend or commit them to the repository.
