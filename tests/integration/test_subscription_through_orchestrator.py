@@ -1,8 +1,3 @@
-"""
-Proves the subscription module works correctly wired into the REAL
-orchestrator (not the dummy module) — the actual integration point of step 2.
-"""
-
 from backend.core.events import EventStore
 from backend.core.orchestrator import Orchestrator
 from backend.modules.subscription.module import SubscriptionModule

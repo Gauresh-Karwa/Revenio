@@ -41,7 +41,7 @@ NUDGE_CHANNEL_ESCALATION = ["email", "sms", "in_app"]
 class CheckoutAbandonmentModule:
     domain_type = "checkout_abandonment"
 
-    def __init__(self, learning_core: Any = None) -> None:
+    def __init__(self, learning_core: Any = None, channel_gateway: Any = None) -> None:
         """
         learning_core: optional backend.core.learning_core.LearningCore.
         When provided AND it has a policy registered for
@@ -49,6 +49,7 @@ class CheckoutAbandonmentModule:
         instead of the fixed email->sms->in_app escalation order.
         """
         self._learning_core = learning_core
+        self._channel_gateway = channel_gateway
 
     # Bandit-informed early exit, symmetric to SubscriptionModule's. Scaled
     # down for this domain's much smaller MAX_NUDGES=3 ceiling.
@@ -197,13 +198,17 @@ class CheckoutAbandonmentModule:
                 timestamp=datetime.now(timezone.utc).isoformat(),
             )
 
+        details = self._channel_gateway.dispatch(case, decision) if self._channel_gateway else {}
         return ExecutionResult(
             success=True,
             compliance_check_passed=True,
             timestamp=datetime.now(timezone.utc).isoformat(),
+            details=details,
         )
 
     def track_outcome(self, case: dict[str, Any]) -> Outcome:
+        if case.get("awaiting_razorpay_confirmation"):
+            return Outcome(status=OutcomeStatus.PENDING, amount_recovered=0.0)
         # No real checkout-completion webhook exists yet at this checkpoint —
         # same honest gap as the subscription module. A case can carry
         # 'simulated_nudge_result' to exercise every branch in tests.

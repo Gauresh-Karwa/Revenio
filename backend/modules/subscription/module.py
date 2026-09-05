@@ -97,6 +97,7 @@ class SubscriptionModule:
         learning_core: Any = None,
         anchor_growth_callback: Any = add_confirmed_hardship_anchor,
         neutral_anchor_growth_callback: Any = add_confirmed_neutral_anchor,
+        channel_gateway: Any = None,
     ) -> None:
         """
         hardship_extractor: swap point for the signal extractor.
@@ -123,6 +124,7 @@ class SubscriptionModule:
         self._learning_core = learning_core
         self._anchor_growth_callback = anchor_growth_callback
         self._neutral_anchor_growth_callback = neutral_anchor_growth_callback
+        self._channel_gateway = channel_gateway
 
     def on_human_review_confirmed(
         self, case: dict[str, Any], confirmed: bool, last_diagnosis_payload: dict[str, Any]
@@ -240,7 +242,20 @@ class SubscriptionModule:
         customer_recent_failure_pressure = compute_pressure_from_customer_history(past_case_outcomes)
 
         email_text = case.get("email_text")
-        hardship_extraction = self._hardship_extractor(email_text)
+        # A response supplied by an approved support channel is already a
+        # direct customer statement. It should not be reclassified through
+        # an email-language model before the mandatory human-review gate.
+        # This is distinct from an inferred text signal and keeps the source
+        # clear in the durable, privacy-safe diagnosis.
+        hardship_extraction = (
+            {
+                "hardship_signal_detected": True,
+                "hardship_confidence_tier": "high",
+                "extracted_reason_code": "customer_reported_hardship",
+            }
+            if case.get("customer_reported_hardship", False)
+            else self._hardship_extractor(email_text)
+        )
         hardship_signal_detected = hardship_extraction["hardship_signal_detected"]
 
         if code in SOFT_DECLINE_CODES:
@@ -363,13 +378,17 @@ class SubscriptionModule:
         )
 
     def execute(self, case: dict[str, Any], decision: Decision) -> ExecutionResult:
+        details = self._channel_gateway.dispatch(case, decision) if self._channel_gateway else {}
         return ExecutionResult(
             success=True,
             compliance_check_passed=True,
             timestamp=datetime.now(timezone.utc).isoformat(),
+            details=details,
         )
 
     def track_outcome(self, case: dict[str, Any]) -> Outcome:
+        if case.get("awaiting_razorpay_confirmation"):
+            return Outcome(status=OutcomeStatus.PENDING, amount_recovered=0.0)
         simulated = case.get("simulated_retry_result")
         if simulated == "recovered":
             return Outcome(

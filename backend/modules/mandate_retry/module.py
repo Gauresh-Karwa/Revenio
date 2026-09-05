@@ -453,6 +453,8 @@ class MandateRetryModule:
         )
 
     def track_outcome(self, case: dict[str, Any]) -> Outcome:
+        if case.get("awaiting_razorpay_confirmation"):
+            return Outcome(status=OutcomeStatus.PENDING, amount_recovered=0.0)
         simulated = case.get("simulated_mandate_result")
         if simulated == "recovered":
             return Outcome(

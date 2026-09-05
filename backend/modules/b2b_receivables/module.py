@@ -108,7 +108,7 @@ def _count_broken_promises(history: list[dict[str, Any]]) -> int:
 class B2BReceivablesModule:
     domain_type = "b2b_receivables"
 
-    def __init__(self, learning_core: Any = None) -> None:
+    def __init__(self, learning_core: Any = None, channel_gateway: Any = None) -> None:
         """
         learning_core: optional backend.core.learning_core.LearningCore,
         same pattern as SubscriptionModule/CheckoutAbandonmentModule. When
@@ -118,6 +118,11 @@ class B2BReceivablesModule:
         preserves the fixed schedule.
         """
         self._learning_core = learning_core
+        # A gateway is injected instead of baked into the module so its
+        # policy remains independently testable.  Production can supply an
+        # approved SMS/voice provider; the interactive demo supplies a
+        # runtime simulator that returns a generated customer response.
+        self._channel_gateway = channel_gateway
 
     def check_stop(
         self, case: dict[str, Any], history: list[dict[str, Any]]
@@ -235,7 +240,11 @@ class B2BReceivablesModule:
         # overdue B2B invoice reaching the most escalated automated channel
         # is exactly the kind of case that should get a human's eyes,
         # not one more automated attempt indistinguishable from the rest.
-        requires_review = channel == "voice" and contact_count >= len(CHANNEL_ESCALATION) - 1
+        requires_review = (
+            channel == "voice"
+            and contact_count >= len(CHANNEL_ESCALATION) - 1
+            and not case.get("review_approved", False)
+        )
 
         return Decision(
             action_type=ActionType.SWITCH_CHANNEL,
@@ -251,13 +260,19 @@ class B2BReceivablesModule:
         # Double-enforcement, matching checkout_abandonment's own pattern:
         # DND is checked again here, not just trusted from check_stop.
         dnd_blocked = case.get("on_dnd_registry", False) or case.get("has_opted_out", False)
+        details: dict[str, Any] = {}
+        if not dnd_blocked and self._channel_gateway is not None:
+            details = self._channel_gateway.dispatch(case, decision)
         return ExecutionResult(
             success=not dnd_blocked,
             compliance_check_passed=not dnd_blocked,
             timestamp=datetime.now(timezone.utc).isoformat(),
+            details=details,
         )
 
     def track_outcome(self, case: dict[str, Any]) -> Outcome:
+        if case.get("awaiting_razorpay_confirmation"):
+            return Outcome(status=OutcomeStatus.PENDING, amount_recovered=0.0)
         simulated = case.get("simulated_payment_result")
         if simulated == "paid_full":
             return Outcome(

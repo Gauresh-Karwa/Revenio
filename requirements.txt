@@ -1,0 +1,7 @@
+psycopg[binary]
+psycopg_pool
+celery
+redis
+fastapi
+uvicorn[standard]
+razorpay

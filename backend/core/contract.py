@@ -76,6 +76,11 @@ class ExecutionResult:
     success: bool
     compliance_check_passed: bool
     timestamp: str  # ISO 8601, set by the module or orchestrator
+    # Delivery providers can attach a safe, human-readable receipt (for
+    # example an SMS reply or a voice-call transcript).  Keeping it on the
+    # execution event makes the merchant/audit UI explain what actually
+    # happened without turning provider state into a second source of truth.
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
