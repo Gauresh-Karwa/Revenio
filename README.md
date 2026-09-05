@@ -17,9 +17,9 @@ The architecture is organized around three things:
 
 ---
 
-## Build order and status
+## Build order and status (1-8)
 
-### Step 1 — Orchestrator skeleton [DONE]
+### 1 — Orchestrator skeleton [DONE]
 
 The full orchestrator loop wired to a dummy stub module. No ML, no real domain logic.
 
@@ -38,7 +38,7 @@ Files:
 - `tests/core/test_orchestrator.py`
 - `tests/core/test_events.py`
 
-### Step 2 — Subscription module, rule-based [DONE]
+### 2 — Subscription module, rule-based [DONE]
 
 Decline-code diagnosis and retry policy. Baseline before any ML.
 
@@ -54,7 +54,7 @@ Files:
 - `backend/modules/subscription/module.py`
 - `tests/modules/subscription/test_subscription_module.py`
 
-### Step 3 — Checkout-abandonment module, rule-based [DONE]
+### 3 — Checkout-abandonment module, rule-based [DONE]
 
 Session-behavioral-event diagnosis. Different event shape from subscription — no decline code exists; the event is a dropped session.
 
@@ -73,7 +73,7 @@ Files:
 - `backend/modules/checkout_abandonment/module.py`
 - `tests/modules/checkout_abandonment/test_checkout_abandonment_module.py`
 
-### Step 4 — Grounded synthetic data [DONE]
+### 4 — Grounded synthetic data [DONE]
 
 Data calibrated against real published taxonomies, not invented.
 
@@ -104,7 +104,7 @@ Files:
 - `tests/data/test_subscription_generator.py`
 - `tests/data/test_checkout_abandonment_generator.py`
 
-### Step 5 — Subscription diagnosis-layer model comparison [DONE]
+### 5 — Subscription diagnosis-layer model comparison [DONE]
 
 Baseline vs GBM vs neural net, evaluated with the same held-out discipline throughout.
 
@@ -117,7 +117,7 @@ Baseline vs GBM vs neural net, evaluated with the same held-out discipline throu
 #### Results (compare.py output, seed=42)
 
 ```
-STEP 5 — Subscription diagnosis-layer model comparison
+5 — Subscription diagnosis-layer model comparison
 
 Entity-level split (soft-decline rows only): 5603 train / 1235 val / 1230 test
 Feature set (10): ['code_51', 'code_05', 'code_91', 'code_96', 'code_65', 'code_61',
@@ -231,20 +231,20 @@ Result:
 
 **Key architectural finding**: A flat tree model given the causal customer failure pressure feature tracks its oracle ceiling within 0.0055 (matching the LSTM's 0.0049 gap). This empirically justifies deploying the simpler, lower-latency flat model bundle into production while preserving the performance gains from cross-case customer memory.
 
-#### Step 5 Addendum — Sequence Model (4th Comparison Point) [DONE]
+##### 5 Addendum — Sequence Model (4th Comparison Point) [DONE]
 
 Architecture doc §6.3 requires a sequence model (LSTM) as a fourth diagnosis-layer comparison point, evaluated with the same held-out entity-level discipline as baseline, GBM, and NN.
 
 What was built:
 - `generate_subscription_retry_sequences()` in `backend/data/subscription_generator.py` — generates genuine chronological retry chains (attempt $k$ only exists if attempt $k-1$ failed), incorporating a causal, recency-weighted customer failure pressure (EWMA with $\alpha=0.5$).
-- `backend/ml/sequence_features.py` — per-step feature construction (10 features: 6 one-hot decline codes, `is_night`, `is_near_payday`, `amount`, `customer_recent_failure_pressure`).
+- `backend/ml/sequence_features.py` — per-stage feature construction (10 features: 6 one-hot decline codes, `is_night`, `is_near_payday`, `amount`, `customer_recent_failure_pressure`).
 - `backend/ml/models/sequence.py` — small sequence model (`RetryLSTM`), tuned via random search + `GroupKFold` entity-aware CV.
 - `backend/ml/compare_sequence.py` — standalone comparison script evaluating the LSTM against its own chain-distribution oracle ceiling.
 
 Results (`compare_sequence.py` output):
 
 ```
-STEP 5, COMPARISON POINT 4 — LSTM sequence model (architecture doc 6.3)
+5, COMPARISON POINT 4 — LSTM sequence model (architecture doc 6.3)
 v2: includes causal customer-history (recency-weighted) effect
 
 7952 genuine retry-chain cases generated (soft-decline only).
@@ -270,7 +270,7 @@ Result:
 
 ---
 
-### Step 5 Final — Unified Comparison: GBM vs MLP vs LSTM [DONE]
+### 5a — Unified comparison: GBM vs MLP vs LSTM [DONE]
 
 All three models retrained on the **same entity-level split** of the **same dataset** (retry-chain sequences, schema v3, 12 features) with a Bayes oracle ceiling. This is the definitive apples-to-apples result.
 
@@ -335,9 +335,9 @@ LSTM (random search, 15 iterations, entity-aware CV)
 
 **GBM test AUC of 0.7002 is within 0.0033 of the Bayes ceiling (0.7035).** There is essentially no remaining headroom to extract from the current feature set with any model architecture. The data is the constraint, not the model.
 
-**The LSTM finding is a legitimate result, not a bug.** The LSTM received the full retry sequence (prior-attempt context that the flat models do not have). It still matched GBM within 0.002. The reason: `true_recovery_probability()` in the generator depends on prior attempts only through `attempt_number` — a scalar already present in the flat feature vector. Once the flat model has `attempt_number`, the sequence order adds zero marginal signal. This confirms the general rule: sequence architectures add value only when step-level ordering contains information that a summarising scalar cannot capture.
+**The LSTM finding is a legitimate result, not a bug.** The LSTM received the full retry sequence (prior-attempt context that the flat models do not have). It still matched GBM within 0.002. The reason: `true_recovery_probability()` in the generator depends on prior attempts only through `attempt_number` — a scalar already present in the flat feature vector. Once the flat model has `attempt_number`, the sequence order adds zero marginal signal. This confirms the general rule: sequence architectures add value only when stage-level ordering contains information that a summarising scalar cannot capture.
 
-**MLP gap (+0.0115):** MLP consistently trails GBM on tabular data at this scale. Expected and consistent with the Step 5 original findings.
+**MLP gap (+0.0115):** MLP consistently trails GBM on tabular data at this scale. Expected and consistent with the 5 original findings.
 
 #### Deployed production bundle (Schema v3, 12 features)
 
@@ -363,13 +363,13 @@ customer_recent_failure_pressure, hardship_signal_detected
 
 ---
 
-### Step 5 Addendum — Hardship Signal Extraction (Schema v3) [DONE]
+### 5b — Hardship signal extraction (Schema v3) [DONE]
 
 Architecture doc §9 requires unstructured customer communications to feed the diagnosis layer. Implemented as a structured signal extracted upstream — not raw text fed into the decision model.
 
 #### Design principle
 
-Extract a `bool` and `enum` from the free-text email upstream; feed those into the existing 12-feature flat pipeline exactly like `customer_recent_failure_pressure`. GBM remains the decision layer. Only the feature-extraction step changes.
+Extract a `bool` and `enum` from the free-text email upstream; feed those into the existing 12-feature flat pipeline exactly like `customer_recent_failure_pressure`. GBM remains the decision layer. Only the feature-extraction phase changes.
 
 #### Extractor: contrastive embedding (default, offline)
 
@@ -439,7 +439,7 @@ SubscriptionModule(hardship_extractor=extract_hardship_signal)        # keyword-
 SubscriptionModule(hardship_extractor=extract_hardship_signal_llm)    # explicit LLM opt-in
 ```
 
-#### Feedback loop (Step 6 integrated)
+#### Feedback loop (6 integrated)
 
 Uncertain-tier cases escalated to human review are the natural feedback signal: when a human confirms an `uncertain`-tier case via `orchestrator.submit_human_review(case_id, confirmed=True, case=case)`, `SubscriptionModule.on_human_review_confirmed` invokes `add_confirmed_hardship_anchor(email_text)`. The anchor bank grows from real human decisions, making future similar phrasing trigger `high` confidence directly.
 
@@ -452,7 +452,7 @@ Uncertain-tier cases escalated to human review are the natural feedback signal: 
 
 ---
 
-### Step 6 — Learning core & Bandit policies [DONE]
+### 6 — Learning core & Bandit policies [DONE]
 
 Drift-aware contextual bandit over domain discrete action spaces, single-writer observer updates, and human review anchor growth loop.
 
@@ -468,13 +468,13 @@ What was built:
 - **Domain Module Wiring**:
   - `SubscriptionModule` selects retry backoff hours dynamically from the bandit arm when `learning_core` is provided.
   - `CheckoutAbandonmentModule` selects nudge escalation channels dynamically from the bandit arm.
-  - Optional `anchor_growth_callback` in `SubscriptionModule.on_human_review_confirmed` closes the Step 6 human-in-the-loop feedback loop.
+  - Optional `anchor_growth_callback` in `SubscriptionModule.on_human_review_confirmed` closes the 6 human-in-the-loop feedback loop.
 
-#### Step 6 Benchmark (`python -m backend.ml.bandit_simulation`)
+#### 6 Benchmark (`python -m backend.ml.bandit_simulation`)
 
 ```
 ======================================================================
-STEP 6 BENCHMARK -- Static vs Stationary vs Drift-Aware, real pipeline
+6 BENCHMARK -- Static vs Stationary vs Drift-Aware, real pipeline
 ======================================================================
 
 --- Drift benchmark: subscription domain, hard regime change mid-batch ---
@@ -527,7 +527,7 @@ rather than eyeballing whether the means look different.
 
 ---
 
-### Step 7 — B2B Receivables Module [DONE]
+### 7 — B2B Receivables Module [DONE]
 
 Third core domain, addressing overdue invoice recovery, strict statutory compliance, and promise-to-pay lifecycles.
 
@@ -591,11 +591,11 @@ Entity-level split  |  Calibrated (sigmoid)  |  No fake numbers
   - **Channel Escalation**: `["email", "sms", "voice"]` provides low-touch to high-touch progression.
   - **Hinglish Synthesis**: Voice action payloads specify `locale: "hi-IN"` (Hindi/Hinglish code-mixing) for localized voice bot synthesis (*"Namaste Sharma ji, ABC Corp se call hai regarding invoice #1042..."*).
   - **Human Review Gate**: Escalation to voice calls on overdue invoices automatically sets `requires_human_review = True` for high-value debt protection.
-  - **Step 9 Interactive Voice Simulator**: The frontend dashboard will include an in-browser voice simulator allowing live Hinglish spoken audio input/output, real-time intent extraction, and state transitions during demo judging.
+  - **Interactive Voice Simulator (Workbench)**: The frontend dashboard will include an in-browser voice simulator allowing live Hinglish spoken audio input/output, real-time intent extraction, and state transitions during demo judging.
 
 ---
 
-### Step 8 — Mandate Retry Sequencer (UPI Autopay & NACH) [DONE]
+### 8 — Mandate retry sequencer (UPI Autopay & NACH) [DONE]
 
 Fourth domain (stretch), expanding recovery to recurring UPI and bank debit mandates under Indian network rules.
 
@@ -735,7 +735,7 @@ python -m backend.ml.train_subscription_model
 
 Runs offline training against the 12-feature dataset (including `hardship_signal_detected` extracted via `extract_hardship_signal_embedding`), builds calibrated GBM and MLP candidates, evaluates on val set, saves the winner to `backend/ml/models/subscription_winner.joblib` (Schema v3) and a human-readable metrics JSON alongside it.
 
-### Run the Step 6 bandit simulation benchmark
+### Run the 6 bandit simulation benchmark
 
 ```
 python -m backend.ml.bandit_simulation
@@ -852,13 +852,13 @@ backend/
     splitting.py         -- entity-level train/val/test splitting
   ml/
     features.py          -- canonical flat & enriched feature construction (one source of truth)
-    sequence_features.py -- sequence per-step feature construction (10 features)
+    sequence_features.py -- sequence per-stage feature construction (10 features)
     text_signals.py      -- hardship signal extraction: contrastive embedding, keyword, LLM, feedback growth
     compare.py           -- flat model comparison: baseline vs GBM vs NN (10 features)
     compare_sequence.py  -- sequence model comparison: LSTM vs chain oracle ceiling
     compare_with_history.py -- flat models with customer history parity (11 features)
     compare_all.py       -- UNIFIED: GBM vs MLP vs LSTM, same split, schema v3
-    bandit_simulation.py -- Step 6 drift & pooling benchmark over observer-driven pipeline
+    bandit_simulation.py -- 6 drift & pooling benchmark over observer-driven pipeline
     train_subscription_model.py -- trainer: produces 12-feature subscription_winner.joblib (Schema v3)
     oracle.py            -- flat oracle AUC ceiling computation
     calibration.py       -- calibration evaluation (Platt/sigmoid)
@@ -894,11 +894,11 @@ tests/
 
 ## What is left to build
 
-### Step 8 — Mandate retry sequencer [STRETCH]
+### Mandate retry sequencer [IMPLEMENTED]
 
 Reuses the subscription module's shape on a different payment rail (UPI/NACH). Cheap to add once the subscription module is proven.
 
-### Step 9 — Interactive merchant workbench [IMPLEMENTED]
+### Interactive merchant workbench [IMPLEMENTED]
 
 The Vite frontend is a payment-operations console rather than a JSON viewer.
 It submits user-entered cases to the real domain modules and renders the
@@ -907,8 +907,9 @@ resulting append-only event history in plain language.
 - Merchant overview: recovered revenue, recovery rate, active cases, review queue and transaction feed
 - Payment workbench: named customer, amount, module-specific reason signals, consent and response controls
 - Portfolio load test: run 10, 50 or 100 fresh mixed transactions and observe WebSocket-driven case updates
+- Portfolio simulations may display simulated recovered or lost outcomes so the workflow can be demonstrated without charging anyone. These are clearly labelled simulation evidence; they never increase confirmed Razorpay revenue.
 - Case record: policy decision, execution receipt, customer effect and outcome rendered as structured fields
-- Human review: approves or stops a gated action; B2B approval releases the Hinglish voice channel
+- Human review: approves or stops a gated action; only workflows explicitly safe to resume (B2B contact escalation and high-value UPI re-authentication) continue automatically. Hardship, ambiguous checkout signals, and specialist-owned cases remain paused.
 - Razorpay recovery-link action: creates a genuine Razorpay SDK payment link only after an explicit operator click and valid credentials
 
 ### Delivery modes
@@ -934,8 +935,8 @@ The default `sandbox` adapter never contacts an email address or phone number.
 - Whether to extend the subscription generator to make recovery probability depend on amount for codes other than 51, or on day-of-week. Currently it does not.
 - Exact `requires_human_review` confidence threshold per domain.
 - Exact promise-to-pay cadence (how many broken promises before `DIMINISHING_RETURNS` fires).
-- Exact bandit algorithm variant for the learning core (discount factor vs window vs both), pending step 6.
-- Hardship anchor feedback loop (uncertain-tier → human review → new anchor): tracked as a Step 6 learning-core task.
+- Exact bandit algorithm variant for the learning core (discount factor vs window vs both), finalized in 6.
+- Hardship anchor feedback loop (uncertain-tier → human review → new anchor): tracked as a 6 learning-core task.
 - Billing inquiries mentioning "charged" or "payment" score 0.42–0.43 against hardship anchors on `all-MiniLM-L6-v2`. Contrastive scoring (H−N) correctly rejects them (H−N = −0.47), but the boundary is documented here: do not lower `_CONTRASTIVE_UNCERTAIN_FLOOR` below 0.0 without re-running the probe script in `backend/ml/models/` to verify no neutral sentence has risen above the new floor.
 - `checkout_abandonment.diagnose()` accepts `customer_history` (required by the shared contract) but does not use it — no cross-case behavioral signal has been built or tested for this domain, unlike subscription's `customer_recent_failure_pressure`. A documented scope decision (flagged in the module's source), not silently dropped.
 
@@ -965,11 +966,11 @@ Every claim in this section has been evaluated empirically or has a documented s
 
 ## Model-family scaling — when to move beyond GBM (analyzed, not yet needed)
 
-A documented rule of thumb, derived from what step 5 actually found rather than assumed in the abstract:
+A documented rule of thumb, derived from what 5 actually found rather than assumed in the abstract:
 
 - **More tabular columns** (e.g. device type, IP risk score, account age): stay with GBM. Confirmed empirically here — `customer_recent_failure_pressure` added as a single engineered feature let a flat GBM track its own oracle ceiling as tightly as the LSTM did (0.0055 vs 0.0049 gap), with no architecture change needed.
-- **Unstructured data** (support-email text, etc.): does NOT require jumping straight to a transformer/LLM as the decision model. A cheaper, consistent pattern: extract a structured signal upstream (contrastive embedding → a bool/enum feature), keep GBM as the decision layer. Only the feature-extraction step changes. Implemented: `extract_hardship_signal_embedding` as the default extractor in Schema v3.
-- **Deep, heterogeneous, cross-domain event sequences** (the Vulcan-scale case — hundreds of mixed-event-type steps spanning subscription, abandonment, and B2B in one timeline): plausibly does need a real sequence/attention architecture, since an EWMA-style flat feature loses step-level detail at that scale. This is a **hypothesis, not a finding** — never built or tested at that scale, unlike the claims above. Flagged as an open question, not asserted as an architectural conclusion.
+- **Unstructured data** (support-email text, etc.): does NOT require jumping straight to a transformer/LLM as the decision model. A cheaper, consistent pattern: extract a structured signal upstream (contrastive embedding → a bool/enum feature), keep GBM as the decision layer. Only the feature-extraction phase changes. Implemented: `extract_hardship_signal_embedding` as the default extractor in Schema v3.
+- **Deep, heterogeneous, cross-domain event sequences** (the Vulcan-scale case — hundreds of mixed-event-type stages spanning subscription, abandonment, and B2B in one timeline): plausibly does need a real sequence/attention architecture, since an EWMA-style flat feature loses stage-level detail at that scale. This is a **hypothesis, not a finding** — never built or tested at that scale, unlike the claims above. Flagged as an open question, not asserted as an architectural conclusion.
 
 ---
 
