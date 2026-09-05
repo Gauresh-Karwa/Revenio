@@ -108,9 +108,19 @@ def test_decide_backoff_increases_with_attempt_count():
     assert later.action_params["retry_in_hours"] > first.action_params["retry_in_hours"]
 
 
-def test_decide_above_afa_threshold_switches_channel_not_human_review():
+def test_decide_above_afa_threshold_requires_high_value_review_before_switching_channel():
     module = MandateRetryModule()
     case = upi_case("U01", amount=AFA_EXEMPTION_THRESHOLD_INR + 5000)
+    diagnosis = module.diagnose(case)
+    decision = module.decide(case, diagnosis, history=[])
+    assert decision.action_type == ActionType.SWITCH_CHANNEL
+    assert decision.action_params["channel"] == "push_notification"
+    assert decision.requires_human_review is True
+
+
+def test_decide_above_afa_threshold_switches_channel_after_review_approval():
+    module = MandateRetryModule()
+    case = upi_case("U01", amount=AFA_EXEMPTION_THRESHOLD_INR + 5000, review_approved=True)
     diagnosis = module.diagnose(case)
     decision = module.decide(case, diagnosis, history=[])
     assert decision.action_type == ActionType.SWITCH_CHANNEL

@@ -381,16 +381,37 @@ class MandateRetryModule:
             )
 
         if diagnosis.root_cause == "afa_reauth_required_above_threshold":
+            # Fresh UPI-PIN authentication is the payment-rail requirement.
+            # This approval is a separate Revenio high-value safety policy:
+            # a specialist checks context and the customer contact route
+            # before a large re-authentication request is sent.
+            if not case.get("review_approved", False):
+                return Decision(
+                    action_type=ActionType.SWITCH_CHANNEL,
+                    action_params={
+                        "channel": "push_notification",
+                        "reason": "manual_upi_pin_reauth_required",
+                        "amount": case.get("amount", 0.0),
+                    },
+                    reasoning=(
+                        f"Amount exceeds the Rs {AFA_EXEMPTION_THRESHOLD_INR:,.0f} AFA "
+                        "threshold. Fresh customer UPI-PIN authentication is required, "
+                        "and Revenio's high-value control requires specialist approval "
+                        "before the re-authentication request is sent."
+                    ),
+                    requires_human_review=True,
+                )
             return Decision(
                 action_type=ActionType.SWITCH_CHANNEL,
                 action_params={
                     "channel": "push_notification",
                     "reason": "manual_upi_pin_reauth_required",
+                    "amount": case.get("amount", 0.0),
                 },
                 reasoning=(
                     f"Amount exceeds the Rs {AFA_EXEMPTION_THRESHOLD_INR:,.0f} AFA "
-                    "exemption threshold — routine manual re-authentication, not "
-                    "an exception, so no human review needed."
+                    "threshold. Specialist approval was recorded; ask the customer "
+                    "to complete fresh UPI-PIN authentication in their UPI app."
                 ),
                 requires_human_review=False,
             )

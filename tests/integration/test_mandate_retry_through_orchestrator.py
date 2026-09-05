@@ -47,6 +47,8 @@ def test_upi_above_afa_threshold_never_reaches_a_silent_retry_execution():
     decisions = [e for e in store.get_events("case-1") if e.event_type == "Decision"]
     assert decisions[0].payload["action_type"] == "SWITCH_CHANNEL"
     assert decisions[0].payload["action_params"]["channel"] == "push_notification"
+    assert decisions[0].payload["requires_human_review"] is True
+    assert not [e for e in store.get_events("case-1") if e.event_type == "ExecutionResult"]
 
 
 def test_nach_correction_required_routes_to_human_review_not_execute():
