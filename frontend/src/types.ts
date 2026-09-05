@@ -38,7 +38,7 @@ export type AuditEvent = {
 
 export type CaseDetail = {
   state: Record<string, unknown> & { case_id?: string; domain_type?: string; terminal_status?: string; stage_count?: number };
-  case: Record<string, unknown> & { customer_name?: string; customer_id?: string; amount?: number; invoice_amount?: number };
+  case: Record<string, unknown> & { customer_name?: string; customer_id?: string; amount?: number; invoice_amount?: number; customer_email?: string; customer_phone?: string };
   events: AuditEvent[];
 };
 
@@ -61,4 +61,5 @@ export type CustomSimulation = {
   response: "recovered" | "lost" | "paid" | "promise" | "no_response" | "needs_human" | "hardship";
   opt_in: boolean;
   days_overdue: number;
+  mandate_rail: "upi_autopay" | "nach";
 };

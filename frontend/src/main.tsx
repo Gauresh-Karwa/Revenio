@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { api, money } from "./api";
 import { EventTimeline } from "./components/EventTimeline";
 import { ExecutionPage } from "./pages/ExecutionPage";
 import { MerchantPage } from "./pages/MerchantPage";
-import type { CaseDetail, CaseRow, CustomSimulation, Dashboard, Review } from "./types";
+import type { CaseDetail, CaseRow, CustomSimulation, Dashboard, IntegrationStatus, Review } from "./types";
 import "./styles.css";
 
 type View = "merchant" | "execution" | "audit" | "review";
@@ -28,23 +28,52 @@ function App() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
+  const [integrations, setIntegrations] = useState<IntegrationStatus | null>(null);
   const [selected, setSelected] = useState<CaseDetail | null>(null);
   const [busy, setBusy] = useState(false);
   const [bulkTarget, setBulkTarget] = useState(0);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
+  const selectedCaseId = useRef<string | null>(null);
+  useEffect(() => { selectedCaseId.current = selected ? String(selected.state.case_id ?? "") || null : null; }, [selected]);
   const refresh = useCallback(async () => {
     try {
-      const [nextDashboard, nextCases, nextReviews] = await Promise.all([api<Dashboard>("/api/dashboard"), api<{ items: CaseRow[] }>("/api/cases"), api<{ items: Review[] }>("/api/reviews")]);
-      setDashboard(nextDashboard); setCases(nextCases.items); setReviews(nextReviews.items); setError("");
+      const [nextDashboard, nextCases, nextReviews, nextIntegrations] = await Promise.all([api<Dashboard>("/api/dashboard"), api<{ items: CaseRow[] }>("/api/cases"), api<{ items: Review[] }>("/api/reviews"), api<IntegrationStatus>("/api/integrations/status")]);
+      setDashboard(nextDashboard); setCases(nextCases.items); setReviews(nextReviews.items); setIntegrations(nextIntegrations); setError("");
     } catch { setError("The Revenio API is unavailable. Start FastAPI on port 8000."); }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refresh();
+      const caseId = selectedCaseId.current;
+      if (caseId) void api<CaseDetail>(`/api/cases/${caseId}`).then(setSelected).catch(() => undefined);
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+  useEffect(() => {
     const protocol = location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${protocol}://${location.host}/ws/events`);
-    socket.onmessage = () => { setProgress((value) => bulkTarget ? Math.min(bulkTarget, value + 1) : value); void refresh(); };
-    return () => socket.close();
+    let socket: WebSocket | null = null;
+    let reconnectTimer = 0;
+    let stopped = false;
+    const connect = () => {
+      if (stopped) return;
+      socket = new WebSocket(`${protocol}://${location.host}/ws/events`);
+      socket.onmessage = (message) => {
+        setProgress((value) => bulkTarget ? Math.min(bulkTarget, value + 1) : value);
+        void refresh();
+        let eventCaseId: string | null = null;
+        try {
+          const parsed = JSON.parse(message.data) as { event?: { case_id?: string } };
+          eventCaseId = String(parsed.event?.case_id ?? "") || null;
+        } catch { /* Ignore malformed socket messages. */ }
+        const caseId = eventCaseId ?? selectedCaseId.current;
+        if (caseId && caseId === selectedCaseId.current) void api<CaseDetail>(`/api/cases/${caseId}`).then(setSelected).catch(() => undefined);
+      };
+      socket.onclose = () => { if (!stopped) reconnectTimer = window.setTimeout(connect, 2_000); };
+    };
+    connect();
+    return () => { stopped = true; window.clearTimeout(reconnectTimer); socket?.close(); };
   }, [refresh, bulkTarget]);
   const showCase = async (caseId: string, nextView: View = "audit") => {
     try { setSelected(await api<CaseDetail>(`/api/cases/${caseId}`)); setView(nextView); }
@@ -70,7 +99,8 @@ function App() {
   };
   const titles: Record<View, string> = { merchant: "Dashboard", execution: "Recovery runs", audit: "Case records", review: "Review queue" };
   const navigation: readonly [View, string, IconName][] = [["merchant", "Dashboard", "grid"], ["execution", "Recovery runs", "bolt"], ["audit", "Case records", "files"], ["review", "Review queue", "shield"]];
-  return <main className="shell"><aside className="sidebar"><div className="brand"><span>R</span><b>Revenio</b></div><nav className="side-nav"><p className="nav-heading">WORKSPACE</p>{navigation.map(([key, label, icon]) => <button className={view === key ? "nav active" : "nav"} onClick={() => setView(key)} key={key}><Icon name={icon} /><span>{label}</span>{key === "review" && reviews.length ? <b className="nav-count">{reviews.length}</b> : null}</button>)}</nav><div className="side-note"><span className="status-dot" /> All systems operational</div></aside><section className="content"><header className="topbar"><div><p className="breadcrumb">Payments / <b>{titles[view]}</b></p><h1>{titles[view]}</h1></div><div className="topbar-actions"><button className="new-action" onClick={() => setView("execution")}><Icon name="plus" /> New recovery</button></div></header>{error && <p className="error">{error}</p>}{view === "merchant" && <MerchantPage dashboard={dashboard} cases={cases} onCase={(id) => void showCase(id)} onNewRecovery={() => setView("execution")} onReviews={() => setView("review")} />}{view === "execution" && <ExecutionPage busy={busy} selected={selected} cases={cases} onSubmit={(request) => void runPayment(request)} onBulk={(count) => void runBulk(count)} progress={progress} bulkTarget={bulkTarget} onCase={(id) => void showCase(id, "execution")} />}{view === "audit" && <AuditPage detail={selected} cases={cases} onCase={(id) => void showCase(id)} />}{view === "review" && <ReviewPage reviews={reviews} busy={busy} onResolve={resolve} onCase={(id) => void showCase(id)} />}</section></main>;
+  const channelLabel = !integrations ? "Checking service status" : integrations.channel_mode === "live" && integrations.live_delivery_acknowledged ? "Live delivery enabled" : "Portfolio simulation mode";
+  return <main className="shell"><aside className="sidebar"><div className="brand"><span>R</span><b>Revenio</b></div><nav className="side-nav"><p className="nav-heading">WORKSPACE</p>{navigation.map(([key, label, icon]) => <button className={view === key ? "nav active" : "nav"} onClick={() => setView(key)} key={key}><Icon name={icon} /><span>{label}</span>{key === "review" && reviews.length ? <b className="nav-count">{reviews.length}</b> : null}</button>)}</nav><div className="service-status"><p className="nav-heading">SERVICE STATUS</p><span><i className={integrations?.email.ready ? "ready" : "not-ready"} /> Email {integrations?.email.ready ? "configured" : "not configured"}</span><span><i className={integrations?.sms_voice.ready ? "ready" : "not-ready"} /> Phone {integrations?.sms_voice.ready ? "configured" : "not configured"}</span><span><i className={integrations?.razorpay.ready ? "ready" : "not-ready"} /> Razorpay {integrations?.razorpay.ready ? integrations.razorpay.mode : "not configured"}</span></div><div className="side-note"><span className="status-dot" /> {channelLabel}</div></aside><section className="content"><header className="topbar"><div><p className="breadcrumb">Payments / <b>{titles[view]}</b></p><h1>{titles[view]}</h1></div><div className="topbar-actions"><button className="new-action" onClick={() => setView("execution")}><Icon name="plus" /> New recovery</button></div></header>{error && <p className="error">{error}</p>}{view === "merchant" && <MerchantPage dashboard={dashboard} cases={cases} onCase={(id) => void showCase(id)} onNewRecovery={() => setView("execution")} onReviews={() => setView("review")} />}{view === "execution" && <ExecutionPage busy={busy} selected={selected} cases={cases} integrations={integrations} onSubmit={(request) => void runPayment(request)} onBulk={(count) => void runBulk(count)} progress={progress} bulkTarget={bulkTarget} onCase={(id) => void showCase(id, "execution")} />}{view === "audit" && <AuditPage detail={selected} cases={cases} onCase={(id) => void showCase(id)} />}{view === "review" && <ReviewPage reviews={reviews} busy={busy} onResolve={resolve} onCase={(id) => void showCase(id)} />}</section></main>;
 }
 
 function AuditPage({ detail, cases, onCase }: { detail: CaseDetail | null; cases: CaseRow[]; onCase: (id: string) => void }) {
