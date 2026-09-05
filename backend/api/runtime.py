@@ -98,6 +98,7 @@ class DemoRuntime:
         response: str,
         opt_in: bool = True,
         days_overdue: int = 30,
+        mandate_rail: str = "upi_autopay",
         await_razorpay_confirmation: bool = True,
     ) -> dict[str, Any]:
         """Create one user-entered incident and run the normal orchestrator.
@@ -154,10 +155,11 @@ class DemoRuntime:
                 "approval_outcome": response,
             }
         elif domain_type == "mandate_retry":
+            rail = mandate_rail if mandate_rail in {"upi_autopay", "nach"} else "upi_autopay"
             payload = {
                 **common,
-                "rail": "upi_autopay",
-                "return_code": failure_code or "U02",
+                "rail": rail,
+                "return_code": failure_code or ("U02" if rail == "upi_autopay" else "NACH_INSUFFICIENT_FUNDS"),
                 "amount": amount,
                 "simulated_mandate_result": "recovered" if response == "recovered" else "lost" if response == "lost" else None,
             }
@@ -226,6 +228,31 @@ class DemoRuntime:
             self.store.append(case_id, state["domain_type"], "customer_reply", "PendingHumanReview", {"reason": action}, customer_id=case.get("customer_id"))
         return self.case_detail(case_id)
 
+    def record_voice_response(self, case_id: str, digits: str, call_sid: str | None = None) -> dict[str, Any]:
+        """Record an explicit DTMF choice from a verified Twilio call."""
+        case = self._cases.get(case_id)
+        if case is None:
+            raise KeyError(case_id)
+        choices = {
+            "1": ("payment_link_requested", "Customer requested a secure payment link."),
+            "2": ("promise_to_pay", "Customer gave a payment commitment during the voice call."),
+            "3": ("human_review_required", "Customer requested a human collections specialist."),
+        }
+        intent, action = choices.get(digits, ("invalid_input", "Customer did not select a recognised voice option."))
+        state = self.store.derive_state(case_id)
+        self.store.append(case_id, state["domain_type"], "voice_response", "CustomerVoiceResponse", {"provider": "Twilio", "call_sid": call_sid, "digits": digits, "intent": intent, "action": action}, customer_id=case.get("customer_id"))
+        if intent in {"human_review_required", "invalid_input"}:
+            self.store.append(case_id, state["domain_type"], "voice_response", "PendingHumanReview", {"reason": action}, customer_id=case.get("customer_id"))
+        return self.case_detail(case_id)
+
+    def record_voice_call_status(self, case_id: str, status: str, call_sid: str | None = None) -> dict[str, Any]:
+        case = self._cases.get(case_id)
+        if case is None:
+            raise KeyError(case_id)
+        state = self.store.derive_state(case_id)
+        self.store.append(case_id, state["domain_type"], "voice_delivery", "VoiceCallStatus", {"provider": "Twilio", "call_sid": call_sid, "status": status}, customer_id=case.get("customer_id"))
+        return self.case_detail(case_id)
+
     def record_razorpay_payment_event(
         self, case_id: str, event_name: str, payment: dict[str, Any]
     ) -> dict[str, Any]:
@@ -265,7 +292,7 @@ class DemoRuntime:
 
         if scenario == "payment_failure":
             decline_code = self._rng.choices(
-                ("51", "05", "91", "96"), weights=(40, 25, 15, 15), k=1
+                ("51", "05", "91", "96", "99"), weights=(40, 25, 15, 15, 5), k=1
             )[0]
             return "subscription", {
                 "customer_id": customer_id,
@@ -289,6 +316,7 @@ class DemoRuntime:
                     "checkout_form_friction",
                     "checkout_page_error",
                     "low_purchase_intent",
+                    "unexpected_processor_response",
                 )
             )
             return "checkout_abandonment", {
@@ -326,7 +354,9 @@ class DemoRuntime:
                 "customer_name": customer_name,
                 "rail": "upi_autopay",
                 "return_code": self._rng.choice(("U02", "U03", "U04")),
-                "amount": round(self._rng.uniform(150, 12_000), 2),
+                # Most mandates are routine; a meaningful minority cross the
+                # AFA threshold and exercise the high-value approval path.
+                "amount": round(self._rng.uniform(15_001, 45_000) if self._rng.random() < 0.2 else self._rng.uniform(150, 12_000), 2),
                 "simulated_mandate_result": self._rng.choice(("recovered", "lost")),
             }
         raise ValueError(f"Unknown scenario '{requested}'")
@@ -373,9 +403,8 @@ class DemoRuntime:
         rows = []
         for row in self.list_cases():
             events = self.store.get_events(row["case_id"])
-            pending = any(event.event_type == "PendingHumanReview" for event in events)
-            resolved = any(event.event_type == "HumanReviewDecision" for event in events)
-            if pending and not resolved:
+            review_events = [event for event in events if event.event_type in {"PendingHumanReview", "HumanReviewDecision"}]
+            if review_events and review_events[-1].event_type == "PendingHumanReview":
                 diagnosis = next((event.payload for event in reversed(events) if event.event_type == "Diagnosis"), {})
                 decision = next((event.payload for event in reversed(events) if event.event_type == "Decision"), {})
                 rows.append({**row, "diagnosis": diagnosis, "decision": decision})
@@ -388,36 +417,50 @@ class DemoRuntime:
         self.orchestrator.submit_human_review(case_id, confirmed=approved, case=case)
         if approved:
             case["review_approved"] = True
-            if self.store.get_events(case_id)[0].domain_type == "b2b_receivables":
+            domain_type = self.store.get_events(case_id)[0].domain_type
+            if domain_type == "b2b_receivables":
                 selected = case.get("approval_outcome")
                 case["simulated_payment_result"] = (
                     "paid_full" if selected in {"paid", "recovered"} else "promised" if selected == "promise" else "written_off" if selected == "lost" else self._rng.choices(
                     ("paid_full", "promised", "written_off"), weights=(50, 35, 15), k=1
                 )[0] if selected is None else None)
-                self.orchestrator.process_case(case_id, "b2b_receivables", case, max_iterations=1)
+                self.orchestrator.process_case(case_id, domain_type, case, max_iterations=1)
+            elif domain_type == "mandate_retry" and case.get("rail") == "upi_autopay" and case.get("amount", 0) > 15_000:
+                self.orchestrator.process_case(case_id, domain_type, case, max_iterations=1)
+            else:
+                # Approval of hardship or an unknown signal means a specialist
+                # owns the case; it is never permission to repeat automation.
+                self.store.append(
+                    case_id, domain_type, "human_review", "HumanReviewResolution",
+                    {"resolution": "specialist_owned", "message": "A specialist accepted this case. Automated recovery remains paused."},
+                    customer_id=case.get("customer_id"),
+                )
         return self.case_detail(case_id)
 
     def dashboard(self) -> dict[str, Any]:
         rows = self.list_cases()
         recovered = 0.0
-        terminal = 0
+        payment_cases = 0
         recovered_cases = 0
         for row in rows:
             events = self.store.get_events(row["case_id"])
-            for event in events:
-                if event.event_type == "Outcome" and event.payload.get("status") == "RECOVERED":
-                    recovered += float(event.payload.get("amount_recovered", 0))
-            if row["terminal"]:
-                terminal += 1
-            if row["status"] == "RECOVERED":
+            payment_updates = [event for event in events if event.event_type == "RazorpayPaymentEvent"]
+            if payment_updates:
+                payment_cases += 1
+            confirmed = [event for event in payment_updates if event.payload.get("event") in {"payment.captured", "payment_link.paid"} or event.payload.get("status") == "captured"]
+            if confirmed:
+                recovered += float(confirmed[-1].payload.get("amount", 0))
                 recovered_cases += 1
         by_domain: dict[str, int] = {}
         for row in rows:
             by_domain[row["domain_type"]] = by_domain.get(row["domain_type"], 0) + 1
         return {
             "money_recovered": round(recovered, 2),
-            "recovery_rate": round((recovered_cases / terminal * 100) if terminal else 0, 1),
-            "active_recoveries": sum(not row["terminal"] for row in rows),
+            "recovery_rate": round((recovered_cases / payment_cases * 100) if payment_cases else 0, 1),
+            # A module's simulated outcome is useful evidence, but it does
+            # not close a revenue-recovery case.  Only a verified Razorpay
+            # payment makes the case economically recovered.
+            "active_recoveries": sum(row["status"] not in {"RECOVERED", "LOST"} and not row["status"].startswith("STOPPED:") for row in rows),
             "human_review_count": len(self.reviews()),
             "total_cases": len(rows),
             "domain_breakdown": [
@@ -434,16 +477,28 @@ class DemoRuntime:
 
     def _status_label(self, case_id: str, state: dict[str, Any]) -> str:
         events = self.store.get_events(case_id)
-        if any(event.event_type == "RecoveryPaymentFailed" for event in events):
-            return "PAYMENT_FAILED"
-        if any(event.event_type == "PendingHumanReview" for event in events) and not any(
-            event.event_type == "HumanReviewDecision" for event in events
-        ):
+        review_events = [event for event in events if event.event_type in {"PendingHumanReview", "HumanReviewDecision"}]
+        if review_events and review_events[-1].event_type == "PendingHumanReview":
             return "HUMAN_REVIEW"
-        if any(event.event_type == "RazorpayPaymentLinkCreated" for event in events):
-            return "AWAITING_PAYMENT"
+        payment_events = [
+            event for event in events
+            if event.event_type in {"RazorpayPaymentLinkCreated", "RazorpayPaymentEvent", "RecoveryPaymentFailed"}
+        ]
+        if payment_events:
+            latest_payment = payment_events[-1]
+            if latest_payment.event_type == "RazorpayPaymentLinkCreated":
+                return "AWAITING_PAYMENT"
+            if latest_payment.event_type == "RecoveryPaymentFailed":
+                return "PAYMENT_FAILED"
+            if latest_payment.payload.get("event") in {"payment.captured", "payment_link.paid"} or latest_payment.payload.get("status") == "captured":
+                return "RECOVERED"
+        if state["terminal_status"] == "RECOVERED":
+            return "SIMULATED_RECOVERY"
         return state["terminal_status"] or "ACTIVE"
 
     @staticmethod
     def _public_case(case: dict[str, Any]) -> dict[str, Any]:
-        return {key: value for key, value in case.items() if key not in {"email_text", "customer_email", "customer_phone"}}
+        # The case record is already behind the authenticated merchant UI.
+        # Keep the entered contact values available there so operators can
+        # verify delivery receipts and copy the reply inbox address.
+        return {key: value for key, value in case.items() if key != "email_text"}

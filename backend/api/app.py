@@ -16,6 +16,7 @@ import os
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,6 +55,7 @@ class CustomSimulationRequest(BaseModel):
     response: str = Field(pattern="^(recovered|lost|paid|promise|no_response|needs_human|hardship)$")
     opt_in: bool = True
     days_overdue: int = Field(default=30, ge=1, le=365)
+    mandate_rail: str = Field(default="upi_autopay", pattern="^(upi_autopay|nach)$")
     await_razorpay_confirmation: bool = True
 
 
@@ -233,6 +235,51 @@ def _case_id_from_resend_recipients(recipients: object) -> str | None:
                 if case_id.lower() == requested:
                     return case_id
     return None
+
+
+async def _twilio_form(request: Request) -> dict[str, str]:
+    raw = (await request.body()).decode(errors="replace")
+    parsed = parse_qs(raw, keep_blank_values=True)
+    return {key: values[-1] for key, values in parsed.items() if values}
+
+
+def _verify_twilio_webhook(request: Request, form: dict[str, str]) -> None:
+    token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+    signature = request.headers.get("x-twilio-signature", "")
+    if not token or not signature:
+        raise HTTPException(status_code=401, detail="Missing Twilio webhook verification data")
+    public_base = os.environ.get("REVENIO_PUBLIC_BASE_URL", "").rstrip("/")
+    if not public_base:
+        raise HTTPException(status_code=503, detail="REVENIO_PUBLIC_BASE_URL is missing")
+    url = f"{public_base}{request.url.path}"
+    if request.url.query:
+        url = f"{url}?{request.url.query}"
+    signed = url + "".join(f"{key}{form[key]}" for key in sorted(form))
+    expected = base64.b64encode(hmac.new(token.encode(), signed.encode(), hashlib.sha1).digest()).decode()
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(status_code=401, detail="Invalid Twilio webhook signature")
+
+
+@app.post("/webhooks/twilio/voice-response")
+async def twilio_voice_response(request: Request, case_id: str) -> dict[str, str]:
+    form = await _twilio_form(request)
+    _verify_twilio_webhook(request, form)
+    try:
+        runtime.record_voice_response(case_id, form.get("Digits", ""), form.get("CallSid"))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Recovery case not found") from exc
+    return {"status": "recorded"}
+
+
+@app.post("/webhooks/twilio/call-status")
+async def twilio_call_status(request: Request, case_id: str) -> dict[str, str]:
+    form = await _twilio_form(request)
+    _verify_twilio_webhook(request, form)
+    try:
+        runtime.record_voice_call_status(case_id, form.get("CallStatus", "unknown"), form.get("CallSid"))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Recovery case not found") from exc
+    return {"status": "recorded"}
 
 
 async def _process_resend_reply(case_id: str, sender: str, email_id: str) -> None:
