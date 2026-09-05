@@ -282,3 +282,124 @@ def test_without_learning_core_b2b_uses_fixed_channel_schedule():
     params = decisions[0].payload["action_params"]
     assert "bandit_arm" not in params, "Fixed schedule must not emit bandit_arm."
     assert params["channel"] == "email",    f"First contact without core must be email, got {params['channel']}"
+
+
+# ---------------------------------------------------------------------------
+# Four-domain pooling: mandate_retry added to the shared LearningCore
+# ---------------------------------------------------------------------------
+
+from backend.modules.mandate_retry.module import MandateRetryModule  # noqa: E402
+
+
+def _make_four_domain_system():
+    """
+    One LearningCore with policies for all four live domains.
+    One BanditUpdateObserver subscribed to one EventStore.
+    All four modules wired to that same core.
+
+    Arm counts:
+      subscription        -> 4 arms (RETRY_BACKOFF_HOURS)
+      checkout_abandonment-> 3 arms (nudge channels)
+      b2b_receivables     -> 3 arms (contact channels)
+      mandate_retry       -> 3 arms (UPI backoff hours: 24/72/168)
+    """
+    core = LearningCore()
+    core.register_policy("subscription",         StationaryThompsonSampling(n_arms=4, seed=1))
+    core.register_policy("checkout_abandonment", StationaryThompsonSampling(n_arms=3, seed=2))
+    core.register_policy("b2b_receivables",      StationaryThompsonSampling(n_arms=3, seed=3))
+    core.register_policy("mandate_retry",        StationaryThompsonSampling(n_arms=3, seed=4))
+
+    store = EventStore()
+    observer = BanditUpdateObserver(core)
+    store.subscribe(observer)
+
+    orchestrator = Orchestrator(store)
+    orchestrator.register_module(SubscriptionModule(learning_core=core))
+    orchestrator.register_module(CheckoutAbandonmentModule(learning_core=core))
+    orchestrator.register_module(B2BReceivablesModule(learning_core=core))
+    orchestrator.register_module(MandateRetryModule(learning_core=core))
+
+    return core, store, orchestrator
+
+
+def test_mandate_retry_decision_carries_bandit_arm_in_four_domain_system():
+    core, store, orchestrator = _make_four_domain_system()
+    orchestrator.process_case(
+        "upi-1", "mandate_retry",
+        {"rail": "upi_autopay", "return_code": "U01", "amount": 500.0, "simulated_mandate_result": "recovered"},
+    )
+    decisions = [e for e in store.get_events("upi-1") if e.event_type == "Decision"]
+    assert len(decisions) >= 1
+    assert "bandit_arm" in decisions[0].payload["action_params"]
+
+
+def test_mandate_retry_updates_only_mandate_retry_policy_not_others():
+    """
+    A UPI Autopay terminal case updates exactly mandate_retry's arm pulls.
+    Subscription, abandonment, and B2B policies must remain at pull_count 0.
+    """
+    core, store, orchestrator = _make_four_domain_system()
+    orchestrator.process_case(
+        "upi-2", "mandate_retry",
+        {"rail": "upi_autopay", "return_code": "U01", "amount": 500.0, "simulated_mandate_result": "recovered"},
+    )
+    snap = core.snapshot()
+    assert sum(a["pull_count"] for a in snap["mandate_retry"]["arms"]) == 1
+    assert sum(a["pull_count"] for a in snap["subscription"]["arms"]) == 0
+    assert sum(a["pull_count"] for a in snap["checkout_abandonment"]["arms"]) == 0
+    assert sum(a["pull_count"] for a in snap["b2b_receivables"]["arms"]) == 0
+
+
+def test_nach_case_does_not_update_any_arm_in_four_domain_system():
+    """
+    NACH decisions never emit bandit_arm -> BanditUpdateObserver
+    never credits any arm -> mandate_retry pull_count stays 0.
+    """
+    core, store, orchestrator = _make_four_domain_system()
+    orchestrator.process_case(
+        "nach-1", "mandate_retry",
+        {"rail": "nach", "return_code": "NACH_INSUFFICIENT_FUNDS", "amount": 5000.0,
+         "simulated_mandate_result": "recovered"},
+    )
+    snap = core.snapshot()
+    assert sum(a["pull_count"] for a in snap["mandate_retry"]["arms"]) == 0
+
+
+def test_all_four_domains_update_independently_interleaved():
+    """
+    The real four-domain pooling proof: processes one case per domain
+    in interleaved order and confirms exactly 1 pull per domain, 0 bleed.
+    """
+    core, store, orchestrator = _make_four_domain_system()
+
+    # subscription case
+    orchestrator.process_case(
+        "sub-1", "subscription",
+        {"decline_code": "51", "simulated_retry_result": "recovered"},
+    )
+    # mandate_retry UPI case
+    orchestrator.process_case(
+        "upi-1", "mandate_retry",
+        {"rail": "upi_autopay", "return_code": "U01", "amount": 500.0,
+         "simulated_mandate_result": "recovered"},
+    )
+    # abandonment case
+    orchestrator.process_case(
+        "abn-1", "checkout_abandonment",
+        {"reached_checkout": True, "opt_in": True,
+         "abandonment_signal": "shipping_cost_surprise",
+         "simulated_nudge_result": "recovered"},
+    )
+    # b2b case
+    orchestrator.process_case(
+        "inv-1", "b2b_receivables",
+        {"invoice_amount": 5000, "due_date": "2026-01-01",
+         "simulated_payment_result": "paid_full"},
+    )
+
+    snap = core.snapshot()
+    assert sum(a["pull_count"] for a in snap["subscription"]["arms"])         == 1
+    assert sum(a["pull_count"] for a in snap["mandate_retry"]["arms"])        == 1
+    assert sum(a["pull_count"] for a in snap["checkout_abandonment"]["arms"]) == 1
+    assert sum(a["pull_count"] for a in snap["b2b_receivables"]["arms"])      == 1
+

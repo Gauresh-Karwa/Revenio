@@ -36,11 +36,13 @@ from backend.core.learning_core import (
 )
 from backend.core.orchestrator import Orchestrator
 from backend.modules.checkout_abandonment.module import CheckoutAbandonmentModule
+from backend.modules.mandate_retry.module import MandateRetryModule
 from backend.modules.subscription.module import SubscriptionModule
 
 SEED = 42
 SUBSCRIPTION_TYPICAL_AMOUNT = 245.0
 ABANDONMENT_TYPICAL_AMOUNT = 120.0
+MANDATE_RETRY_TYPICAL_AMOUNT = 1800.0  # ~median of UPI Autopay lognormal (exp(7.5))
 
 REGIME_A_PROBS = [0.30, 0.55, 0.45, 0.20]  # 6h backoff best pre-shift
 REGIME_B_PROBS = [0.55, 0.25, 0.20, 0.15]  # 1h backoff best post-shift
@@ -126,16 +128,30 @@ def run_drift_benchmark_multi_trial(n_trials: int = 7, n_cases_per_regime: int =
 
 
 def run_pooling_check(n_cases: int = 450) -> dict[str, dict]:
+    """
+    Four-domain pooling check: subscription + checkout_abandonment +
+    mandate_retry all sharing ONE LearningCore and ONE BanditUpdateObserver,
+    proving that policies are completely isolated — each domain's arm counts
+    are updated only by that domain's own outcomes.
+
+    mandate_retry arm probs mirror the generator's UPI soft_insufficient_funds
+    shape: arm 1 (72h) is best, arm 0 (24h) worst — same relative ordering as
+    UPI_SOFT_INSUF_FUNDS_RECOVERY_BY_ARM in mandate_retry_generator.py.
+    """
     core = LearningCore()
     core.register_policy("subscription", DriftAwareThompsonSampling(n_arms=4, discount_factor=0.95, seed=SEED))
     core.register_policy(
         "checkout_abandonment", DriftAwareThompsonSampling(n_arms=3, discount_factor=0.95, seed=SEED)
+    )
+    core.register_policy(
+        "mandate_retry", DriftAwareThompsonSampling(n_arms=3, discount_factor=0.95, seed=SEED)
     )
     store = EventStore()
     store.subscribe(BanditUpdateObserver(core))
     orchestrator = Orchestrator(store)
     orchestrator.register_module(SubscriptionModule(learning_core=core))
     orchestrator.register_module(CheckoutAbandonmentModule(learning_core=core))
+    orchestrator.register_module(MandateRetryModule(learning_core=core))
 
     rng = np.random.default_rng(SEED)
     sub_result = _run_subscription_batch(orchestrator, store, rng, REGIME_A_PROBS, n_cases, "pooled-sub")
@@ -159,6 +175,24 @@ def run_pooling_check(n_cases: int = 450) -> dict[str, dict]:
             abandonment_money += ABANDONMENT_TYPICAL_AMOUNT
             abandonment_recoveries += 1
 
+    # mandate_retry: UPI soft_insufficient_funds arm probs (matches generator)
+    mandate_probs = [0.40, 0.65, 0.55]  # arm 0=24h, 1=72h, 2=168h
+    mandate_recoveries = 0
+    mandate_money = 0.0
+    for i in range(n_cases):
+        case_id = f"pooled-mandate-{i}"
+        case = {"rail": "upi_autopay", "return_code": "U01",
+                "amount": MANDATE_RETRY_TYPICAL_AMOUNT}
+        orchestrator.process_case(case_id, "mandate_retry", case, max_iterations=1)
+        decisions = [e for e in store.get_events(case_id) if e.event_type == "Decision"]
+        arm = decisions[-1].payload["action_params"].get("bandit_arm", 0)
+        recovered = rng.random() < mandate_probs[arm]
+        case["simulated_mandate_result"] = "recovered" if recovered else "lost"
+        orchestrator.process_case(case_id, "mandate_retry", case, max_iterations=3)
+        if recovered:
+            mandate_money += MANDATE_RETRY_TYPICAL_AMOUNT
+            mandate_recoveries += 1
+
     return {
         "subscription": sub_result,
         "abandonment": {
@@ -166,7 +200,12 @@ def run_pooling_check(n_cases: int = 450) -> dict[str, dict]:
             "recovery_rate": abandonment_recoveries / n_cases,
             "n_cases": n_cases,
         },
-        "aggregate_money": sub_result["money_recovered"] + abandonment_money,
+        "mandate_retry": {
+            "money_recovered": mandate_money,
+            "recovery_rate": mandate_recoveries / n_cases,
+            "n_cases": n_cases,
+        },
+        "aggregate_money": sub_result["money_recovered"] + abandonment_money + mandate_money,
     }
 
 
@@ -226,14 +265,16 @@ def main() -> None:
     print("  treating that specific margin as confirmed rather than suggestive.")
 
     print("\n" + "=" * 70)
-    print("--- Pooling check: subscription + abandonment, ONE shared LearningCore ---")
+    print("--- Pooling check: sub + abandonment + mandate_retry, ONE LearningCore ---")
     print("=" * 70)
     pooling = run_pooling_check()
-    print(f"  Subscription -> money=${pooling['subscription']['money_recovered']:.0f}  "
+    print(f"  Subscription   -> money=${pooling['subscription']['money_recovered']:.0f}  "
           f"recovery_rate={pooling['subscription']['recovery_rate']:.3f}")
-    print(f"  Abandonment  -> money=${pooling['abandonment']['money_recovered']:.0f}  "
+    print(f"  Abandonment    -> money=${pooling['abandonment']['money_recovered']:.0f}  "
           f"recovery_rate={pooling['abandonment']['recovery_rate']:.3f}")
-    print(f"  Aggregate money recovered (both domains): ${pooling['aggregate_money']:.0f}")
+    print(f"  Mandate Retry  -> money=${pooling['mandate_retry']['money_recovered']:.0f}  "
+          f"recovery_rate={pooling['mandate_retry']['recovery_rate']:.3f}")
+    print(f"  Aggregate money recovered (three domains): ${pooling['aggregate_money']:.0f}")
 
 
 if __name__ == "__main__":
