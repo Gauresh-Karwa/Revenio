@@ -16,6 +16,7 @@ import random
 from html import escape
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -204,11 +205,43 @@ class LiveChannelGateway:
             payload["Body"] = str(receipt["message"])
             resource, provider = "Messages", "Twilio SMS"
         else:
-            payload["Twiml"] = f"<Response><Say voice=\"alice\">{escape(str(receipt['message']))}</Say></Response>"
+            public_base = os.environ.get("REVENIO_PUBLIC_BASE_URL", "").rstrip("/")
+            case_id = str(case.get("recovery_case_id", ""))
+            if not public_base or not case_id:
+                receipt["response"] = "Voice delivery blocked: REVENIO_PUBLIC_BASE_URL or the recovery case reference is missing."
+                return receipt
+            encoded_case_id = quote(case_id, safe="")
+            gather_url = f"{public_base}/webhooks/twilio/voice-response?case_id={encoded_case_id}"
+            status_url = f"{public_base}/webhooks/twilio/call-status?case_id={encoded_case_id}"
+            script = (
+                "Namaste. Yeh Revenio payment support se call hai. "
+                "Aapke pending payment ke liye, payment link ke liye 1 dabaiye. "
+                "Kal ya kisi aur din payment karne ka promise dene ke liye 2 dabaiye. "
+                "Human support specialist se baat karne ke liye 3 dabaiye."
+            )
+            payload["Twiml"] = (
+                "<Response><Gather input=\"dtmf\" numDigits=\"1\" timeout=\"8\" "
+                f"action=\"{escape(gather_url, quote=True)}\" method=\"POST\">"
+                f"<Say voice=\"Google.en-IN-Chirp3-HD-Kore\" language=\"en-IN\">{escape(script)}</Say>"
+                "</Gather><Say voice=\"Google.en-IN-Chirp3-HD-Kore\" language=\"en-IN\">"
+                "Humein response nahi mila. Aapko payment reminder email mein details mil jayengi. Dhanyavaad."
+                "</Say></Response>"
+            )
+            # Trial accounts can reject optional call-lifecycle controls even
+            # when a verified recipient is used.  DTMF Gather remains enough
+            # for a real interactive demo; enable detailed status callbacks
+            # only after upgrading an account.
+            if os.environ.get("TWILIO_ENABLE_STATUS_CALLBACKS", "").lower() == "true":
+                payload["StatusCallback"] = status_url
+                payload["StatusCallbackEvent"] = "initiated ringing answered completed"
+                payload["StatusCallbackMethod"] = "POST"
             resource, provider = "Calls", "Twilio Voice"
+        receipt.update({"provider": provider, "recipient": recipient})
         auth = base64.b64encode(f"{sid}:{token}".encode()).decode()
         result = _post_json(f"https://api.twilio.com/2010-04-01/Accounts/{sid}/{resource}.json", urlencode(payload).encode(), {"Authorization": f"Basic {auth}", "Content-Type": "application/x-www-form-urlencoded"})
         receipt.update({"provider": provider, "recipient": recipient, "provider_message_id": result.get("sid"), "response": "Phone delivery accepted by provider.", "effect": "delivery_submitted"})
+        if receipt["channel"] == "voice":
+            receipt["input_options"] = "1 payment link, 2 promise to pay, 3 human specialist"
         return receipt
 
 
