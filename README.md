@@ -16,9 +16,9 @@ Compliance is not an afterthought. Retrying a stolen or expired card violates Vi
 
 ## How It Works
 
-The system is built around four independent recovery modules — card subscriptions, checkout abandonment, B2B receivables, and UPI/NACH mandates. Each module plugs into a shared orchestrator through the same five-method interface (`check_stop`, `diagnose`, `decide`, `execute`, `track_outcome`). The orchestrator handles the loop, the audit log, and the human review queue. It contains no domain logic of its own.
+The system is built around four independent recovery modules card subscriptions, checkout abandonment, B2B receivables, and UPI/NACH mandates. Each module plugs into a shared orchestrator through the same five-method interface (`check_stop`, `diagnose`, `decide`, `execute`, `track_outcome`). The orchestrator handles the loop, the audit log, and the human review queue. It contains no domain logic of its own.
 
-State is stored as an append-only event log in PostgreSQL. There is no separate state table to keep in sync — state is always derived by replaying the log, which means the audit trail is complete by construction and there is no way for state to go silently wrong.
+State is stored as an append-only event log in PostgreSQL. There is no separate state table to keep in sync state is always derived by replaying the log, which means the audit trail is complete by construction and there is no way for state to go silently wrong.
 
 ---
 
@@ -26,29 +26,29 @@ State is stored as an append-only event log in PostgreSQL. There is no separate 
 
 **Card subscriptions**
 
-The system reads the ISO 8583 decline code before doing anything. Expired, stolen, and lost cards get an immediate permanent stop — no retry, no escalation, because attempting those is a card scheme violation. Soft declines (insufficient funds, issuer unavailable) go into a retry schedule driven by a calibrated XGBoost model that predicts the best timing window. The model uses 12 features including attempt number, time of day, payday proximity, and whether the customer has flagged financial hardship.
+The system reads the ISO 8583 decline code before doing anything. Expired, stolen, and lost cards get an immediate permanent stop no retry, no escalation, because attempting those is a card scheme violation. Soft declines (insufficient funds, issuer unavailable) go into a retry schedule driven by a calibrated XGBoost model that predicts the best timing window. The model uses 12 features including attempt number, time of day, payday proximity, and whether the customer has flagged financial hardship.
 
-When a customer replies to an outreach message, their text is classified by a sentence-transformer model using contrastive scoring against hardship and neutral anchor banks. The classifier outputs three tiers — confirmed hardship, uncertain, and no signal. Both confirmed and uncertain cases go to the Human Review Queue. Uncertain cases are never forced into a binary decision, because a missed hardship is more expensive than an unnecessary human review.
+When a customer replies to an outreach message, their text is classified by a sentence-transformer model using contrastive scoring against hardship and neutral anchor banks. The classifier outputs three tiers confirmed hardship, uncertain, and no signal. Both confirmed and uncertain cases go to the Human Review Queue. Uncertain cases are never forced into a binary decision, because a missed hardship is more expensive than an unnecessary human review.
 
 A Thompson Sampling bandit continuously adjusts retry timing across all domains based on real outcomes. Under non-stationary conditions (where the best retry window shifts over time), the drift-aware variant significantly outperforms a static schedule (p = 0.046 across 7 independent trials).
 
 **Checkout abandonment**
 
-The module only fires on sessions that reached the checkout page — add-to-cart abandonment has a different profile and chasing it recovers less than it costs. Outreach is blocked without DPDP marketing consent. Recovery is confirmed only on payment completion via a Razorpay payment link, not on open or click.
+The module only fires on sessions that reached the checkout page add-to-cart abandonment has a different profile and chasing it recovers less than it costs. Outreach is blocked without DPDP marketing consent. Recovery is confirmed only on payment completion via a Razorpay payment link, not on open or click.
 
 **B2B receivables**
 
-Overdue invoices are tracked against the MSMEDA Section 43B(h) 45-day statutory deadline, which creates a real tax-deductibility incentive for debtors to settle. The escalation path is email, then SMS, then a Twilio voice call in Hindi/Hinglish. If a debtor flags a dispute, automated outreach stops immediately and the case goes to human review — collection never continues on a contested invoice.
+Overdue invoices are tracked against the MSMEDA Section 43B(h) 45-day statutory deadline, which creates a real tax-deductibility incentive for debtors to settle. The escalation path is email, then SMS, then a Twilio voice call in Hindi/Hinglish. If a debtor flags a dispute, automated outreach stops immediately and the case goes to human review collection never continues on a contested invoice.
 
 **UPI AutoPay and NACH mandates**
 
-NPCI caps UPI AutoPay retries at 4 total attempts. Transactions above the RBI ₹15,000 AFA threshold cannot be auto-debited and require UPI PIN re-authentication from the customer. NACH Return 8 (account closed) cancels the mandate immediately — continuing to present on a closed account generates bank fees. All of this is enforced at the code level, not in documentation.
+NPCI caps UPI AutoPay retries at 4 total attempts. Transactions above the RBI ₹15,000 AFA threshold cannot be auto-debited and require UPI PIN re-authentication from the customer. NACH Return 8 (account closed) cancels the mandate immediately continuing to present on a closed account generates bank fees. All of this is enforced at the code level, not in documentation.
 
 ---
 
 ## ML Results
 
-All models are trained on entity-level splits — no customer appears in both training and test data.
+All models are trained on entity-level splits no customer appears in both training and test data.
 
 **Subscription timing oracle**
 
@@ -59,7 +59,7 @@ All models are trained on entity-level splits — no customer appears in both tr
 | LSTM | 0.6982 | 0.0053 |
 | MLP | 0.6920 | 0.0115 |
 
-The LSTM was given the full chronological retry sequence; GBM only had the flat 12-feature vector per attempt. GBM still won. The reason is that the data-generating function depends on prior attempts only through `attempt_number`, which is already in the flat feature set — so the sequence adds nothing once that scalar is present. The Bayes ceiling is computed directly from the generating function, not estimated from a model.
+The LSTM was given the full chronological retry sequence; GBM only had the flat 12-feature vector per attempt. GBM still won. The reason is that the data-generating function depends on prior attempts only through `attempt_number`, which is already in the flat feature set so the sequence adds nothing once that scalar is present. The Bayes ceiling is computed directly from the generating function, not estimated from a model.
 
 **B2B receivables**
 
